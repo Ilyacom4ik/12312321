@@ -21,6 +21,7 @@ PROXY_RU_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/
 PROXY_EU_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_eu.txt"
 PROXY_ALL_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_all.txt"
 
+SUPPORT_URL = "https://pay.cloudtips.ru/p/2486fa1a"
 CHANNEL_URL = "https://t.me/FreeCFGHub"
 LTE_KEYS_COUNT = 5
 FULL_KEYS_COUNT = 7
@@ -197,6 +198,7 @@ def kb_main():
             [{"text": "📁 Получить подписку", "callback_data": "menu_sub"}],
             [{"text": "🔑 Получить ключи", "callback_data": "menu_keys"}],
             [{"text": "🌍 Прокси для Telegram", "callback_data": "menu_proxy"}],
+            [{"text": "💳 Поддержать канал", "url": SUPPORT_URL}],
             [{"text": "ℹ️ Справка", "callback_data": "menu_help"}],
         ]
     }
@@ -329,11 +331,9 @@ def handle_callback(cb):
             edit_message(chat_id, message_id, f"❌ Прокси для {label} временно недоступны", reply_markup=kb_proxy_countries())
             return
         proxies = proxies[:5]
-        keyboard = []
-        for i, proxy in enumerate(proxies, 1):
-            keyboard.append([{"text": f"🔵 Подключиться #{i}", "url": proxy}])
+        keyboard = [[{"text": f"🔵 Подключиться #{i}", "url": p}] for i, p in enumerate(proxies, 1)]
         keyboard.append([{"text": "◀️ Назад", "callback_data": "menu_proxy"}])
-        edit_message(chat_id, message_id, f"🌍 <b>MTProto прокси для Telegram</b>\n\n📍 Регион: {label}\n📦 Доступно: {len(proxies)}\n\n📢 {CHANNEL_URL}", reply_markup={"inline_keyboard": keyboard})
+        edit_message(chat_id, message_id, f"🌍 <b>MTProto прокси для Telegram</b>\n\n📍 {label}\n📦 Доступно: {len(proxies)}\n\n📢 {CHANNEL_URL}", reply_markup={"inline_keyboard": keyboard})
 
     elif data == "menu_help":
         log_action(user, "ℹ️ ОТКРЫЛ СПРАВКУ")
