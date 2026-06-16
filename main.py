@@ -23,7 +23,7 @@ PROXY_ALL_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads
 
 SUPPORT_URL = "https://pay.cloudtips.ru/p/2486fa1a"
 CHANNEL_URL = "https://t.me/FreeCFGHub"
-LTE_KEYS_COUNT = 5
+LITE_KEYS_COUNT = 5  # Изменено с LTE_KEYS_COUNT
 FULL_KEYS_COUNT = 7
 
 STATS_FILE = "stats.json"
@@ -46,7 +46,7 @@ def load_stats():
         with open(STATS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     except:
-        return {"lte_requests": 0, "full_requests": 0, "sub_small": 0, "sub_big": 0, "proxy_ru": 0, "proxy_eu": 0, "proxy_all": 0}
+        return {"lite_requests": 0, "full_requests": 0, "sub_small": 0, "sub_big": 0, "proxy_ru": 0, "proxy_eu": 0, "proxy_all": 0}
 
 def save_stats(stats):
     try:
@@ -158,7 +158,7 @@ def fetch_and_parse_keys():
         r = requests.get(KEYS_SOURCE_URL, timeout=15)
         if r.status_code != 200:
             return None, f"Ошибка загрузки: {r.status_code}"
-        lte_keys = []
+        lite_keys = []  # Изменено с lte_keys
         full_keys = []
         for line in r.text.splitlines():
             line = line.strip()
@@ -166,11 +166,11 @@ def fetch_and_parse_keys():
                 continue
             if not re.match(r'^(vless|vmess|trojan|ss|tuic|hysteria2)://', line):
                 continue
-            if re.search(r'\bLTE\b', line, re.IGNORECASE):
-                lte_keys.append(line)
+            if re.search(r'\bLite\b', line, re.IGNORECASE):  # Изменено с LTE на Lite
+                lite_keys.append(line)
             else:
                 full_keys.append(line)
-        return {"lte": lte_keys, "full": full_keys}, None
+        return {"lite": lite_keys, "full": full_keys}, None  # Изменено с lte на lite
     except Exception as e:
         return None, str(e)
 
@@ -185,7 +185,7 @@ def get_status_text():
         return f"❌ Ошибка: {error}"
     return (
         f"📊 <b>Статус подписки</b>\n\n"
-        f"🏳️ LTE ключей: {len(keys_data.get('lte', []))}\n"
+        f"🏳️ Lite ключей: {len(keys_data.get('lite', []))}\n"  # Изменено с LTE на Lite
         f"🏴 Full ключей: {len(keys_data.get('full', []))}\n\n"
         f"📢 {CHANNEL_URL}"
     )
@@ -215,7 +215,7 @@ def kb_subscriptions():
 def kb_keys():
     return {
         "inline_keyboard": [
-            [{"text": "LTE", "callback_data": "keys_lte"}, {"text": "Full", "callback_data": "keys_full"}],
+            [{"text": "Lite", "callback_data": "keys_lite"}, {"text": "Full", "callback_data": "keys_full"}],  # Изменено с LTE на Lite
             [{"text": "◀️ Назад", "callback_data": "back_main"}],
         ]
     }
@@ -292,12 +292,12 @@ def handle_callback(cb):
     elif data == "menu_keys":
         log_action(user, "🔑 ОТКРЫЛ МЕНЮ КЛЮЧЕЙ")
         edit_message(chat_id, message_id, TEXT_KEYS_MENU, reply_markup=kb_keys())
-    elif data in ("keys_lte", "keys_full"):
-        key_type = "lte" if data == "keys_lte" else "full"
-        count = LTE_KEYS_COUNT if key_type == "lte" else FULL_KEYS_COUNT
-        label = "LTE" if key_type == "lte" else "Full"
+    elif data in ("keys_lite", "keys_full"):  # Изменено с keys_lte
+        key_type = "lite" if data == "keys_lite" else "full"  # Изменено с lte на lite
+        count = LITE_KEYS_COUNT if key_type == "lite" else FULL_KEYS_COUNT  # Изменено с LTE_KEYS_COUNT
+        label = "Lite" if key_type == "lite" else "Full"  # Изменено с LTE на Lite
         log_action(user, f"🔑 ЗАПРОСИЛ КЛЮЧИ {label}")
-        increment_stat("lte_requests" if key_type == "lte" else "full_requests")
+        increment_stat("lite_requests" if key_type == "lite" else "full_requests")  # Изменено с lte_requests
         edit_message(chat_id, message_id, f"⏳ Загружаю...")
         keys_data, error = fetch_and_parse_keys()
         if error:
