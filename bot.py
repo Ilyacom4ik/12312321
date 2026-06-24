@@ -23,10 +23,11 @@ PROXY_ALL_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads
 
 SUPPORT_URL = "https://pay.cloudtips.ru/p/2486fa1a"
 CHANNEL_URL = "https://t.me/FreeCFGHub"
-LITE_KEYS_COUNT = 5  # Изменено с LTE_KEYS_COUNT
+LITE_KEYS_COUNT = 5
 FULL_KEYS_COUNT = 7
 
 STATS_FILE = "stats.json"
+ADMIN_ID = 1321104939  # Твой Telegram ID
 
 # ===== ЛОГГЕР =====
 def log_action(user, action, details=""):
@@ -59,6 +60,39 @@ def increment_stat(key):
     stats = load_stats()
     stats[key] = stats.get(key, 0) + 1
     save_stats(stats)
+
+def get_all_users():
+    """Собирает всех уникальных пользователей из stats.json и других источников"""
+    stats = load_stats()
+    # Здесь можно хранить список пользователей в stats
+    users = stats.get("users", [])
+    # Если список пуст, возвращаем хотя бы админа для теста
+    if not users:
+        users = [ADMIN_ID]
+    return users
+
+def add_user(user_id):
+    """Добавляет пользователя в список, если его там нет"""
+    stats = load_stats()
+    users = stats.get("users", [])
+    if user_id not in users:
+        users.append(user_id)
+        stats["users"] = users
+        save_stats(stats)
+
+def broadcast_message(text):
+    """Отправляет сообщение всем пользователям"""
+    users = get_all_users()
+    sent = 0
+    failed = 0
+    for user_id in users:
+        try:
+            send_message(user_id, f"📢 {text}")
+            sent += 1
+        except Exception as e:
+            print(f"Не удалось отправить {user_id}: {e}", flush=True)
+            failed += 1
+    return sent, failed
 
 # ===== ФУНКЦИИ =====
 
@@ -113,6 +147,7 @@ def set_bot_commands():
         {"command": "proxy", "description": "🌍 Прокси для Telegram"},
         {"command": "status", "description": "📡 Статус"},
         {"command": "help", "description": "ℹ️ Справка"},
+        {"command": "broadcast", "description": "📢 Рассылка (админ)"},
     ]
     requests.post(f"{API}/setMyCommands", json={"commands": commands}, timeout=10)
     print("✅ Команды меню установлены", flush=True)
@@ -158,7 +193,7 @@ def fetch_and_parse_keys():
         r = requests.get(KEYS_SOURCE_URL, timeout=15)
         if r.status_code != 200:
             return None, f"Ошибка загрузки: {r.status_code}"
-        lite_keys = []  # Изменено с lte_keys
+        lite_keys = []
         full_keys = []
         for line in r.text.splitlines():
             line = line.strip()
@@ -166,11 +201,11 @@ def fetch_and_parse_keys():
                 continue
             if not re.match(r'^(vless|vmess|trojan|ss|tuic|hysteria2)://', line):
                 continue
-            if re.search(r'\bLite\b', line, re.IGNORECASE):  # Изменено с LTE на Lite
+            if re.search(r'\bLite\b', line, re.IGNORECASE):
                 lite_keys.append(line)
             else:
                 full_keys.append(line)
-        return {"lite": lite_keys, "full": full_keys}, None  # Изменено с lte на lite
+        return {"lite": lite_keys, "full": full_keys}, None
     except Exception as e:
         return None, str(e)
 
@@ -185,7 +220,7 @@ def get_status_text():
         return f"❌ Ошибка: {error}"
     return (
         f"📊 <b>Статус подписки</b>\n\n"
-        f"🏳️ Lite ключей: {len(keys_data.get('lite', []))}\n"  # Изменено с LTE на Lite
+        f"🏳️ Lite ключей: {len(keys_data.get('lite', []))}\n"
         f"🏴 Full ключей: {len(keys_data.get('full', []))}\n\n"
         f"📢 {CHANNEL_URL}"
     )
@@ -215,7 +250,7 @@ def kb_subscriptions():
 def kb_keys():
     return {
         "inline_keyboard": [
-            [{"text": "Lite", "callback_data": "keys_lite"}, {"text": "Full", "callback_data": "keys_full"}],  # Изменено с LTE на Lite
+            [{"text": "Lite", "callback_data": "keys_lite"}, {"text": "Full", "callback_data": "keys_full"}],
             [{"text": "◀️ Назад", "callback_data": "back_main"}],
         ]
     }
@@ -239,10 +274,26 @@ def handle_message(msg):
     chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text", "")
     user = msg.get("from", {})
+    user_id = user.get("id")
     name = user.get("first_name") or "друг"
 
     if not chat_id:
         return
+
+    # Добавляем пользователя в список для рассылки
+    if user_id:
+        add_user(user_id)
+
+    # ===== АДМИН-КОМАНДЫ =====
+    if user_id == ADMIN_ID:
+        if text.startswith("/broadcast "):
+            msg_text = text[11:].strip()
+            if msg_text:
+                sent, failed = broadcast_message(msg_text)
+                send_message(chat_id, f"✅ Рассылка отправлена: {sent} доставлено, {failed} не доставлено")
+            else:
+                send_message(chat_id, "⚠️ Используйте: /broadcast [текст сообщения]")
+            return
 
     if text == "/start":
         log_action(user, "🚀 ЗАПУСТИЛ БОТА")
@@ -292,12 +343,12 @@ def handle_callback(cb):
     elif data == "menu_keys":
         log_action(user, "🔑 ОТКРЫЛ МЕНЮ КЛЮЧЕЙ")
         edit_message(chat_id, message_id, TEXT_KEYS_MENU, reply_markup=kb_keys())
-    elif data in ("keys_lite", "keys_full"):  # Изменено с keys_lte
-        key_type = "lite" if data == "keys_lite" else "full"  # Изменено с lte на lite
-        count = LITE_KEYS_COUNT if key_type == "lite" else FULL_KEYS_COUNT  # Изменено с LTE_KEYS_COUNT
-        label = "Lite" if key_type == "lite" else "Full"  # Изменено с LTE на Lite
+    elif data in ("keys_lite", "keys_full"):
+        key_type = "lite" if data == "keys_lite" else "full"
+        count = LITE_KEYS_COUNT if key_type == "lite" else FULL_KEYS_COUNT
+        label = "Lite" if key_type == "lite" else "Full"
         log_action(user, f"🔑 ЗАПРОСИЛ КЛЮЧИ {label}")
-        increment_stat("lite_requests" if key_type == "lite" else "full_requests")  # Изменено с lte_requests
+        increment_stat("lite_requests" if key_type == "lite" else "full_requests")
         edit_message(chat_id, message_id, f"⏳ Загружаю...")
         keys_data, error = fetch_and_parse_keys()
         if error:
