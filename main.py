@@ -6,44 +6,48 @@ import re
 import json
 import random
 import requests
-import time
 from datetime import datetime
-from urllib.parse import unquote
 
 BOT_TOKEN = os.environ['TG_BOT_TOKEN']
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# ===== КОНФИГ =====
+# ===== ПОДПИСКИ И КЛЮЧИ =====
 SMALL_SUB_URL = "https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/refs/heads/main/subscriptions/FreeCFGHub1.txt"
 BIG_SUB_URL = "https://raw.githubusercontent.com/Ilyacom4ik/vpn-keys/refs/heads/main/allkeysFreeCFGHub.txt"
 KEYS_SOURCE_URL = "https://raw.githubusercontent.com/Ilyacom4ik/vpn-keys/refs/heads/main/allkeysFreeCFGHub.txt"
 
+# ===== ПРОКСИ =====
 PROXY_RU_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_ru.txt"
 PROXY_EU_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_eu.txt"
 PROXY_ALL_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_all.txt"
 
 SUPPORT_URL = "https://pay.cloudtips.ru/p/2486fa1a"
 CHANNEL_URL = "https://t.me/FreeCFGHub"
-CHANNEL_MIX_URL = "https://t.me/FreeCFGHubMIX"
 LITE_KEYS_COUNT = 5
 FULL_KEYS_COUNT = 7
 
 STATS_FILE = "stats.json"
+SHARED_KEYS_FILE = "shared_keys.txt"
 ADMIN_ID = 1321104939  # Твой Telegram ID
 
-# ===== КАНАЛЫ ДЛЯ ПРОВЕРКИ =====
+# ===== ОБЯЗАТЕЛЬНАЯ ПОДПИСКА =====
 REQUIRED_CHANNELS = [
-    {"id": "@FreeCFGHub", "url": "https://t.me/FreeCFGHub"},
-    {"id": "@FreeCFGHubMIX", "url": "https://t.me/FreeCFGHubMIX"}
+    {"username": "@FreeCFGHub", "title": "📢 FreeCFGHub", "url": "https://t.me/FreeCFGHub"},
+    {"username": "@FreeCFGHubMIX", "title": "📢 FreeCFGHub MIX", "url": "https://t.me/FreeCFGHubMIX"},
 ]
 
-# ===== ССЫЛКИ =====
+# ===== ПОДДЕРЖКА / ДОКУМЕНТЫ =====
+SUPPORT_USERNAME = "@Ilyacom4ik"
+SUPPORT_EMAIL = "FreeCFGHub@Gmail.com"
 PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-FreeCFGHub-06-03"
 TERMS_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-FreeCFGHub-06-03"
 
-# ===== КЭШ ПОДПИСОК (запоминаем проверенных пользователей) =====
-# <--- НОВОЕ
-verified_users = set()
+# Ключи-протоколы, которые принимаем при добровольной отправке
+KEY_PROTOCOL_RE = re.compile(r'^(vless|vmess|trojan|ss|tuic|hysteria2)://', re.IGNORECASE)
+
+# Временное состояние пользователей в памяти (не переживает перезапуск)
+# uid -> "waiting_key" | None
+user_state = {}
 
 # ===== ЛОГГЕР =====
 def log_action(user, action, details=""):
@@ -57,31 +61,35 @@ def log_action(user, action, details=""):
         log_entry += f" | {details}"
     print(log_entry, flush=True)
 
+def user_str_from(user):
+    user_id = user.get("id", "?")
+    username = user.get("username", "")
+    first_name = user.get("first_name", "")
+    return f"{first_name} (@{username}) [{user_id}]" if username else f"{first_name} [{user_id}]"
+
 # ===== СТАТИСТИКА =====
 def load_stats():
     try:
         with open(STATS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return {
-            "lite_requests": 0, 
-            "full_requests": 0, 
-            "sub_small": 0, 
-            "sub_big": 0, 
-            "proxy_ru": 0, 
-            "proxy_eu": 0, 
-            "proxy_all": 0,
-            "ratings": [],
-            "avg_rating": 0,
-            "users": [],
-            "donations": []
-        }
+            data = json.load(f)
+    except Exception:
+        data = {}
+    data.setdefault("lite_requests", 0)
+    data.setdefault("full_requests", 0)
+    data.setdefault("sub_small", 0)
+    data.setdefault("sub_big", 0)
+    data.setdefault("proxy_ru", 0)
+    data.setdefault("proxy_eu", 0)
+    data.setdefault("proxy_all", 0)
+    data.setdefault("users", [])
+    data.setdefault("ratings", {"sum": 0, "count": 0, "users": {}})
+    return data
 
 def save_stats(stats):
     try:
         with open(STATS_FILE, 'w', encoding='utf-8') as f:
             json.dump(stats, f, ensure_ascii=False, indent=2)
-    except:
+    except Exception:
         pass
 
 def increment_stat(key):
@@ -104,46 +112,46 @@ def add_user(user_id):
         stats["users"] = users
         save_stats(stats)
 
-# ===== ПРОВЕРКА ПОДПИСКИ (с кэшем) =====
-# <--- ИЗМЕНЕНО
-def is_user_verified(user_id):
-    """Проверяет, есть ли пользователь в кэше已验证"""
-    return user_id in verified_users
+def save_rating(user_id, score):
+    stats = load_stats()
+    ratings = stats["ratings"]
+    prev = ratings["users"].get(str(user_id))
+    if prev is not None:
+        ratings["sum"] += (score - prev)
+    else:
+        ratings["sum"] += score
+        ratings["count"] += 1
+    ratings["users"][str(user_id)] = score
+    stats["ratings"] = ratings
+    save_stats(stats)
 
-def check_subscription(user_id):
-    """Проверяет подписку на каналы (с кэшированием)"""
-    # Если уже проверен — пропускаем
-    if is_user_verified(user_id):
-        return True
-    
-    for channel in REQUIRED_CHANNELS:
-        channel_id = channel["id"]
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember"
-            params = {"chat_id": channel_id, "user_id": user_id}
-            r = requests.get(url, params=params, timeout=10)
-            data = r.json()
-            if not data.get("ok"):
-                return False
-            status = data.get("result", {}).get("status")
-            if status not in ["member", "administrator", "creator"]:
-                return False
-        except Exception as e:
-            print(f"Ошибка проверки подписки на {channel_id}: {e}", flush=True)
-            return False
-    
-    # Если дошли сюда — подписка есть, добавляем в кэш
-    verified_users.add(user_id)
-    return True
+def get_rating_text():
+    stats = load_stats()
+    ratings = stats["ratings"]
+    count = ratings.get("count", 0)
+    total = ratings.get("sum", 0)
+    avg = (total / count) if count else 0
+    stars_full = "⭐" * round(avg)
+    return (
+        f"⭐ <b>Оценка проекта</b>\n\n"
+        f"Средняя оценка: {avg:.2f} / 5 {stars_full}\n"
+        f"Голосов: {count}"
+    )
 
-def get_subscription_keyboard():
-    buttons = []
-    for channel in REQUIRED_CHANNELS:
-        buttons.append([{"text": f"📢 Подписаться на {channel['id']}", "url": channel["url"]}])
-    buttons.append([{"text": "🔄 Проверить подписку", "callback_data": "check_sub"}])
-    return {"inline_keyboard": buttons}
+def get_stats_text():
+    stats = load_stats()
+    return (
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователей: {len(stats.get('users', []))}\n"
+        f"🏳️ Lite запросов: {stats.get('lite_requests', 0)}\n"
+        f"🏴 Full запросов: {stats.get('full_requests', 0)}\n"
+        f"📦 Небольшая подписка: {stats.get('sub_small', 0)}\n"
+        f"🗂 Большая подписка: {stats.get('sub_big', 0)}\n"
+        f"🇷🇺 Прокси RU: {stats.get('proxy_ru', 0)}\n"
+        f"🇪🇺 Прокси EU: {stats.get('proxy_eu', 0)}\n"
+        f"🌍 Прокси ALL: {stats.get('proxy_all', 0)}\n"
+    )
 
-# ===== РАССЫЛКА =====
 def broadcast_message(text):
     users = get_all_users()
     sent = 0
@@ -157,7 +165,8 @@ def broadcast_message(text):
             failed += 1
     return sent, failed
 
-# ===== API ФУНКЦИИ =====
+# ===== ФУНКЦИИ TELEGRAM API =====
+
 def get_updates(offset=None):
     params = {"timeout": 30}
     if offset:
@@ -192,14 +201,38 @@ def edit_message(chat_id, message_id, text, reply_markup=None):
     except Exception as e:
         print(f"Ошибка edit_message: {e}", flush=True)
 
-def answer_callback(callback_id, text=""):
+def answer_callback(callback_id, text="", show_alert=False):
     try:
         requests.post(f"{API}/answerCallbackQuery", json={
             "callback_query_id": callback_id,
-            "text": text
+            "text": text,
+            "show_alert": show_alert
         }, timeout=10)
     except Exception as e:
         print(f"Ошибка answer_callback: {e}", flush=True)
+
+def get_chat_member(channel_username, user_id):
+    try:
+        r = requests.get(f"{API}/getChatMember", params={
+            "chat_id": channel_username,
+            "user_id": user_id
+        }, timeout=10)
+        data = r.json()
+        if not data.get("ok"):
+            print(f"getChatMember ошибка для {channel_username}: {data}", flush=True)
+            return None
+        return data["result"].get("status")
+    except Exception as e:
+        print(f"Ошибка get_chat_member: {e}", flush=True)
+        return None
+
+def is_subscribed(user_id):
+    """Проверяет подписку пользователя на все обязательные каналы."""
+    for ch in REQUIRED_CHANNELS:
+        status = get_chat_member(ch["username"], user_id)
+        if status not in ("member", "administrator", "creator"):
+            return False
+    return True
 
 def set_bot_commands():
     commands = [
@@ -207,17 +240,16 @@ def set_bot_commands():
         {"command": "sub", "description": "📁 Получить подписку"},
         {"command": "keys", "description": "🔑 Получить ключи"},
         {"command": "proxy", "description": "🌍 Прокси для Telegram"},
-        {"command": "donate", "description": "💝 Добровольная помощь"},
-        {"command": "support", "description": "🆘 Поддержка"},
         {"command": "status", "description": "📡 Статус"},
+        {"command": "support", "description": "🆘 Поддержка"},
         {"command": "help", "description": "ℹ️ Справка"},
         {"command": "broadcast", "description": "📢 Рассылка (админ)"},
-        {"command": "admin", "description": "⚙️ Панель администратора (админ)"},
     ]
     requests.post(f"{API}/setMyCommands", json={"commands": commands}, timeout=10)
     print("✅ Команды меню установлены", flush=True)
 
 # ===== ТЕКСТЫ =====
+
 def text_welcome(name):
     return (
         f"Привет, {name} 👋\n\n"
@@ -226,53 +258,46 @@ def text_welcome(name):
         "/sub — получить подписку\n"
         "/keys — получить ключи\n"
         "/proxy — прокси для Telegram\n"
-        "/donate — добровольная помощь\n"
         "/status — статус подписки\n"
-        "/support — поддержка\n"
-        "/help — справка\n\n"
+        "/support — поддержка\n\n"
         f"📢 {CHANNEL_URL}"
     )
 
 TEXT_SUB_MENU = "🔶 <b>Выберите тип подписки</b>"
 TEXT_KEYS_MENU = "🔷 <b>Выберите тип ключа</b>"
+TEXT_HELP = "📜 <b>Справка</b>\n\n/sub — подписка\n/keys — ключи\n/proxy — прокси\n/support — поддержка\n/status — статус"
 TEXT_STATUS_LOADING = "⏳ Проверяю..."
 
-TEXT_HELP = (
-    "ℹ️ <b>Справка</b>\n\n"
-    "📁 <b>Команды:</b>\n"
-    "/sub — получить подписку\n"
-    "/keys — получить ключи\n"
-    "/proxy — прокси для Telegram\n"
-    "/donate — добровольная помощь\n"
-    "/support — поддержка\n"
-    "/status — статус подписки\n"
-    "/help — эта справка\n\n"
-    "📜 <b>Документы:</b>\n"
-    f"• <a href='{PRIVACY_URL}'>Политика конфиденциальности</a>\n"
-    f"• <a href='{TERMS_URL}'>Пользовательское соглашение</a>\n\n"
-    f"📢 {CHANNEL_URL}"
+TEXT_NEED_SUBSCRIPTION = (
+    "🔒 <b>Доступ ограничен</b>\n\n"
+    "Чтобы пользоваться ботом, подпишись на наши каналы, а затем нажми "
+    "«✅ Я подписался»."
 )
 
-TEXT_SUPPORT = (
-    "🆘 <b>Поддержка</b>\n\n"
-    "Если у вас возникли проблемы или вопросы, вы можете связаться со мной:\n\n"
-    "📱 <b>Telegram:</b> @Ilyacom4ik\n"
-    "📧 <b>Email:</b> FreeCFGHub@Gmail.com\n\n"
-    "⏱ Время ответа: до 24 часов\n\n"
-    f"📢 {CHANNEL_URL}"
+TEXT_SHARE_KEY_PROMPT = (
+    "🎁 <b>Поделиться ключом</b>\n\n"
+    "Пришли ключ одним сообщением. Поддерживаются протоколы:\n"
+    "<code>vless://</code>, <code>vmess://</code>, <code>trojan://</code>, "
+    "<code>ss://</code>, <code>tuic://</code>, <code>hysteria2://</code>\n\n"
+    "Чтобы отменить — нажми «◀️ Назад»."
 )
 
-TEXT_DONATE = (
-    "💝 <b>Добровольная помощь</b>\n\n"
-    "Если вам нравится наш проект и вы хотите поддержать его развитие, "
-    "вы можете отправить конфигурационные ключи (vless://, vmess://, trojan://, ss://, tuic://, hysteria2://)\n\n"
-    "📤 Отправьте ключ или подписку в ответ на это сообщение, и мы добавим его в общую базу.\n\n"
-    "🔗 Также вы можете поддержать нас материально:\n"
-    f"{SUPPORT_URL}\n\n"
-    "Спасибо за вашу поддержку! ❤️"
+TEXT_SHARE_KEY_THANKS = "🙏 Спасибо! Ключ отправлен на проверку админу."
+TEXT_SHARE_KEY_BAD_FORMAT = (
+    "⚠️ Не похоже на ключ поддерживаемого протокола. Пришли ссылку, "
+    "начинающуюся с vless://, vmess://, trojan://, ss://, tuic:// или hysteria2://, "
+    "либо нажми «◀️ Назад»."
 )
+
+def text_support():
+    return (
+        "🆘 <b>Поддержка</b>\n\n"
+        f"По всем вопросам пиши сюда: {SUPPORT_USERNAME}\n"
+        f"Либо на почту: {SUPPORT_EMAIL}"
+    )
 
 # ===== ЗАГРУЗКА =====
+
 def fetch_proxies_from_url(url):
     try:
         r = requests.get(url, timeout=15)
@@ -318,30 +343,33 @@ def get_status_text():
     keys_data, error = fetch_and_parse_keys()
     if error:
         return f"❌ Ошибка: {error}"
-    stats = load_stats()
-    avg_rating = stats.get("avg_rating", 0)
     return (
         f"📊 <b>Статус подписки</b>\n\n"
         f"🏳️ Lite ключей: {len(keys_data.get('lite', []))}\n"
-        f"🏴 Full ключей: {len(keys_data.get('full', []))}\n"
-        f"⭐ Рейтинг проекта: {avg_rating:.1f} / 5.0\n"
-        f"👥 Пользователей: {len(stats.get('users', []))}\n\n"
+        f"🏴 Full ключей: {len(keys_data.get('full', []))}\n\n"
         f"📢 {CHANNEL_URL}"
     )
 
 # ===== КЛАВИАТУРЫ =====
-def kb_main():
-    return {
-        "inline_keyboard": [
-            [{"text": "📁 Получить подписку", "callback_data": "menu_sub"}],
-            [{"text": "🔑 Получить ключи", "callback_data": "menu_keys"}],
-            [{"text": "🌍 Прокси для Telegram", "callback_data": "menu_proxy"}],
-            [{"text": "💝 Добровольная помощь", "callback_data": "menu_donate"}],
-            [{"text": "⭐ Оценить проект", "callback_data": "rate_project"}],
-            [{"text": "💳 Поддержать канал", "url": SUPPORT_URL}],
-            [{"text": "ℹ️ Справка", "callback_data": "menu_help"}],
-        ]
-    }
+
+def kb_main(user_id=None):
+    rows = [
+        [{"text": "📁 Получить подписку", "callback_data": "menu_sub"}],
+        [{"text": "🔑 Получить ключи", "callback_data": "menu_keys"}],
+        [{"text": "🌍 Прокси для Telegram", "callback_data": "menu_proxy"}],
+        [{"text": "🎁 Поделиться ключом", "callback_data": "share_key"}],
+        [{"text": "💳 Поддержать канал", "url": SUPPORT_URL}],
+        [{"text": "🆘 Поддержка", "callback_data": "menu_support"}, {"text": "ℹ️ Справка", "callback_data": "menu_help"}],
+        [{"text": "🔒 Конфиденциальность", "url": PRIVACY_URL}, {"text": "📄 Соглашение", "url": TERMS_URL}],
+    ]
+    if user_id == ADMIN_ID:
+        rows.append([{"text": "⚙️ Настройки (админ)", "callback_data": "admin_settings"}])
+    return {"inline_keyboard": rows}
+
+def kb_subscribe_required():
+    rows = [[{"text": ch["title"], "url": ch["url"]}] for ch in REQUIRED_CHANNELS]
+    rows.append([{"text": "✅ Я подписался", "callback_data": "check_sub"}])
+    return {"inline_keyboard": rows}
 
 def kb_subscriptions():
     return {
@@ -370,31 +398,35 @@ def kb_proxy_countries():
         ]
     }
 
-def kb_rating():
-    buttons = []
-    for i in range(5, 0, -1):
-        stars = "⭐" * i
-        buttons.append([{"text": f"{stars} {i}", "callback_data": f"rate_{i}"}])
-    buttons.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
-    return {"inline_keyboard": buttons}
+def kb_back():
+    return {"inline_keyboard": [[{"text": "🏠 В главное меню", "callback_data": "back_main"}]]}
 
-def kb_admin():
-    stats = load_stats()
-    avg_rating = stats.get("avg_rating", 0)
-    ratings_count = len(stats.get("ratings", []))
+def kb_share_key():
+    return {"inline_keyboard": [[{"text": "◀️ Назад", "callback_data": "back_main"}]]}
+
+def kb_rating():
+    return {
+        "inline_keyboard": [[
+            {"text": "⭐", "callback_data": "rate_1"},
+            {"text": "⭐⭐", "callback_data": "rate_2"},
+            {"text": "⭐⭐⭐", "callback_data": "rate_3"},
+            {"text": "⭐⭐⭐⭐", "callback_data": "rate_4"},
+            {"text": "⭐⭐⭐⭐⭐", "callback_data": "rate_5"},
+        ]]
+    }
+
+def kb_admin_settings():
     return {
         "inline_keyboard": [
-            [{"text": f"⭐ Рейтинг: {avg_rating:.1f} ({ratings_count} оценок)", "callback_data": "admin_rating"}],
-            [{"text": "📊 Статистика", "callback_data": "admin_stats"}],
-            [{"text": "👥 Пользователи", "callback_data": "admin_users"}],
             [{"text": "◀️ Назад", "callback_data": "back_main"}],
         ]
     }
 
-def kb_back():
-    return {"inline_keyboard": [[{"text": "🏠 В главное меню", "callback_data": "back_main"}]]}
-
 # ===== ОБРАБОТКА =====
+
+def send_rating_prompt(chat_id):
+    send_message(chat_id, "Оцени проект, пожалуйста 🙏", reply_markup=kb_rating())
+
 def handle_message(msg):
     chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text", "")
@@ -408,7 +440,7 @@ def handle_message(msg):
     if user_id:
         add_user(user_id)
 
-    # ===== АДМИН-КОМАНДЫ (всегда работают) =====
+    # ===== АДМИН-КОМАНДЫ (без проверки подписки) =====
     if user_id == ADMIN_ID:
         if text.startswith("/broadcast "):
             msg_text = text[11:].strip()
@@ -418,59 +450,32 @@ def handle_message(msg):
             else:
                 send_message(chat_id, "⚠️ Используйте: /broadcast [текст сообщения]")
             return
-        if text == "/admin":
-            log_action(user, "⚙️ ОТКРЫЛ ПАНЕЛЬ АДМИНИСТРАТОРА")
-            send_message(chat_id, "⚙️ <b>Панель администратора</b>", reply_markup=kb_admin())
-            return
 
-    # <--- ИЗМЕНЕНО: проверка подписки с кэшем
-    # Если пользователь уже верифицирован - пропускаем проверку
-    if not is_user_verified(user_id):
-        # Проверяем подписку
-        if not check_subscription(user_id):
-            # Если не подписан - показываем кнопки подписки
-            if text != "/start":
-                send_message(
-                    chat_id,
-                    "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
-                    f"📢 {CHANNEL_URL}\n"
-                    f"📢 {CHANNEL_MIX_URL}\n\n"
-                    "После подписки нажмите кнопку ниже 👇",
-                    reply_markup=get_subscription_keyboard()
-                )
-            else:
-                # Для /start показываем приветствие с кнопками подписки
-                send_message(
-                    chat_id,
-                    f"Привет, {name} 👋\n\n"
-                    "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
-                    f"📢 {CHANNEL_URL}\n"
-                    f"📢 {CHANNEL_MIX_URL}\n\n"
-                    "После подписки нажмите кнопку ниже 👇",
-                    reply_markup=get_subscription_keyboard()
-                )
-            return
-
-    # Добровольная помощь (отправка ключей)
-    if text.startswith(("vless://", "vmess://", "trojan://", "ss://", "tuic://", "hysteria2://")):
-        log_action(user, "💝 ОТПРАВИЛ КЛЮЧ ДЛЯ ПОМОЩИ")
-        stats = load_stats()
-        donations = stats.get("donations", [])
-        donations.append({
-            "user": user_id,
-            "username": user.get("username", ""),
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "key": text[:50] + "..." if len(text) > 50 else text
-        })
-        stats["donations"] = donations
-        save_stats(stats)
-        send_message(chat_id, "💝 <b>Спасибо за вашу помощь!</b>\n\nКлюч принят и будет добавлен в общую базу.\n\nСпасибо, что поддерживаете проект! ❤️")
-        send_message(ADMIN_ID, f"📥 Получен ключ от @{user.get('username', 'Unknown')}\n\n<code>{text[:100]}...</code>")
+    # ===== ОБРАБОТКА ОЖИДАЕМОГО ВВОДА (добровольная отправка ключа) =====
+    if user_state.get(user_id) == "waiting_key" and text and not text.startswith("/"):
+        if KEY_PROTOCOL_RE.match(text.strip()):
+            user_state[user_id] = None
+            try:
+                with open(SHARED_KEYS_FILE, 'a', encoding='utf-8') as f:
+                    f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {user_str_from(user)}: {text.strip()}\n")
+            except Exception as e:
+                print(f"Ошибка записи shared_keys: {e}", flush=True)
+            log_action(user, "🎁 ПРЕДЛОЖИЛ КЛЮЧ", text.strip())
+            send_message(ADMIN_ID, f"🎁 <b>Новый ключ от пользователя</b>\n\n{user_str_from(user)}\n\n<code>{text.strip()}</code>")
+            send_message(chat_id, TEXT_SHARE_KEY_THANKS, reply_markup=kb_back())
+        else:
+            send_message(chat_id, TEXT_SHARE_KEY_BAD_FORMAT, reply_markup=kb_share_key())
         return
+
+    # ===== ПРОВЕРКА ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ =====
+    if user_id != ADMIN_ID and text in ("/start", "/sub", "/keys", "/proxy", "/status", "/support", "/help", "/info"):
+        if not is_subscribed(user_id):
+            send_message(chat_id, TEXT_NEED_SUBSCRIPTION, reply_markup=kb_subscribe_required())
+            return
 
     if text == "/start":
         log_action(user, "🚀 ЗАПУСТИЛ БОТА")
-        send_message(chat_id, text_welcome(name), reply_markup=kb_main())
+        send_message(chat_id, text_welcome(name), reply_markup=kb_main(user_id))
     elif text == "/sub":
         log_action(user, "📁 ОТКРЫЛ МЕНЮ ПОДПИСОК")
         send_message(chat_id, TEXT_SUB_MENU, reply_markup=kb_subscriptions())
@@ -484,12 +489,9 @@ def handle_message(msg):
         log_action(user, "📡 ЗАПРОСИЛ СТАТУС")
         send_message(chat_id, TEXT_STATUS_LOADING)
         send_message(chat_id, get_status_text())
-    elif text == "/donate":
-        log_action(user, "💝 ОТКРЫЛ МЕНЮ ПОМОЩИ")
-        send_message(chat_id, TEXT_DONATE, reply_markup=kb_back())
     elif text == "/support":
         log_action(user, "🆘 ОТКРЫЛ ПОДДЕРЖКУ")
-        send_message(chat_id, TEXT_SUPPORT, reply_markup=kb_back())
+        send_message(chat_id, text_support(), reply_markup=kb_back())
     elif text in ("/help", "/info"):
         log_action(user, "ℹ️ ОТКРЫЛ СПРАВКУ")
         send_message(chat_id, TEXT_HELP, reply_markup=kb_back())
@@ -504,30 +506,23 @@ def handle_callback(cb):
 
     answer_callback(cb["id"])
 
-    # <--- ИЗМЕНЕНО: проверка подписки с кэшем
-    if not is_user_verified(user_id):
-        if data != "check_sub":
-            send_message(
-                chat_id,
-                "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
-                f"📢 {CHANNEL_URL}\n"
-                f"📢 {CHANNEL_MIX_URL}\n\n"
-                "После подписки нажмите кнопку ниже 👇",
-                reply_markup=get_subscription_keyboard()
-            )
-            return
-
     if data == "check_sub":
-        if check_subscription(user_id):
-            # <--- НОВОЕ: добавляем в кэш
-            verified_users.add(user_id)
-            edit_message(chat_id, message_id, "✅ <b>Подписка подтверждена!</b>\n\n" + text_welcome(name), reply_markup=kb_main())
+        if is_subscribed(user_id):
+            log_action(user, "✅ ПОДТВЕРДИЛ ПОДПИСКУ")
+            edit_message(chat_id, message_id, text_welcome(name), reply_markup=kb_main(user_id))
         else:
-            edit_message(chat_id, message_id, "❌ <b>Вы не подписаны на все каналы!</b>\n\nПожалуйста, подпишитесь:", reply_markup=get_subscription_keyboard())
+            answer_callback(cb["id"], "❌ Подписка не найдена. Подпишись на оба канала и попробуй снова.", show_alert=True)
+        return
 
-    elif data == "back_main":
+    # Проверка подписки для всех остальных действий (кроме админа)
+    if user_id != ADMIN_ID and not is_subscribed(user_id):
+        edit_message(chat_id, message_id, TEXT_NEED_SUBSCRIPTION, reply_markup=kb_subscribe_required())
+        return
+
+    if data == "back_main":
+        user_state[user_id] = None
         log_action(user, "🏠 ВЕРНУЛСЯ В ГЛАВНОЕ МЕНЮ")
-        edit_message(chat_id, message_id, text_welcome(name), reply_markup=kb_main())
+        edit_message(chat_id, message_id, text_welcome(name), reply_markup=kb_main(user_id))
 
     elif data == "menu_sub":
         log_action(user, "📁 ОТКРЫЛ МЕНЮ ПОДПИСОК")
@@ -536,10 +531,12 @@ def handle_callback(cb):
         log_action(user, "📦 ВЫБРАЛ НЕБОЛЬШУЮ ПОДПИСКУ")
         increment_stat("sub_small")
         edit_message(chat_id, message_id, f"📦 <b>Небольшая подписка</b>\n\n<code>{SMALL_SUB_URL}</code>", reply_markup=kb_back())
+        send_rating_prompt(chat_id)
     elif data == "sub_big":
         log_action(user, "🗂 ВЫБРАЛ БОЛЬШУЮ ПОДПИСКУ")
         increment_stat("sub_big")
         edit_message(chat_id, message_id, f"🗂 <b>Большая подписка</b>\n\n<code>{BIG_SUB_URL}</code>", reply_markup=kb_back())
+        send_rating_prompt(chat_id)
 
     elif data == "menu_keys":
         log_action(user, "🔑 ОТКРЫЛ МЕНЮ КЛЮЧЕЙ")
@@ -562,6 +559,7 @@ def handle_callback(cb):
         selected = get_random_keys(keys, count)
         keys_block = "\n\n".join(f"<code>{k}</code>" for k in selected)
         edit_message(chat_id, message_id, f"🔑 <b>{label} — {len(selected)} шт.</b>\n\n{keys_block}\n\n📢 {CHANNEL_URL}", reply_markup=kb_back())
+        send_rating_prompt(chat_id)
 
     elif data == "menu_proxy":
         log_action(user, "🌍 ОТКРЫЛ МЕНЮ ПРОКСИ")
@@ -586,73 +584,35 @@ def handle_callback(cb):
         keyboard = [[{"text": f"🔵 Подключиться #{i}", "url": p}] for i, p in enumerate(proxies, 1)]
         keyboard.append([{"text": "◀️ Назад", "callback_data": "menu_proxy"}])
         edit_message(chat_id, message_id, f"🌍 <b>MTProto прокси для Telegram</b>\n\n📍 {label}\n📦 Доступно: {len(proxies)}\n\n📢 {CHANNEL_URL}", reply_markup={"inline_keyboard": keyboard})
+        send_rating_prompt(chat_id)
 
-    elif data == "menu_donate":
-        log_action(user, "💝 ОТКРЫЛ МЕНЮ ПОМОЩИ")
-        edit_message(chat_id, message_id, TEXT_DONATE, reply_markup=kb_back())
+    elif data == "share_key":
+        log_action(user, "🎁 ОТКРЫЛ ФОРМУ ОТПРАВКИ КЛЮЧА")
+        user_state[user_id] = "waiting_key"
+        edit_message(chat_id, message_id, TEXT_SHARE_KEY_PROMPT, reply_markup=kb_share_key())
 
-    elif data == "rate_project":
-        log_action(user, "⭐ ОТКРЫЛ ОЦЕНКУ ПРОЕКТА")
-        edit_message(chat_id, message_id, "⭐ <b>Оцените наш проект</b>\n\nНасколько вам нравится бот? Выберите оценку от 1 до 5:", reply_markup=kb_rating())
-
-    elif data.startswith("rate_"):
-        rating = int(data.split("_")[1])
-        log_action(user, f"⭐ ПОСТАВИЛ ОЦЕНКУ {rating}")
-        stats = load_stats()
-        ratings = stats.get("ratings", [])
-        ratings.append({"user": user_id, "rating": rating, "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-        stats["ratings"] = ratings
-        avg_rating = sum(r["rating"] for r in ratings) / len(ratings) if ratings else 0
-        stats["avg_rating"] = avg_rating
-        save_stats(stats)
-        stars = "⭐" * rating
-        edit_message(chat_id, message_id, f"✅ <b>Спасибо за вашу оценку!</b>\n\n{stars} {rating}/5\n\nВаше мнение очень важно для нас! ❤️", reply_markup=kb_back())
+    elif data == "menu_support":
+        log_action(user, "🆘 ОТКРЫЛ ПОДДЕРЖКУ")
+        edit_message(chat_id, message_id, text_support(), reply_markup=kb_back())
 
     elif data == "menu_help":
         log_action(user, "ℹ️ ОТКРЫЛ СПРАВКУ")
         edit_message(chat_id, message_id, TEXT_HELP, reply_markup=kb_back())
 
-    # АДМИН-КОМАНДЫ
-    elif data == "admin_rating":
-        stats = load_stats()
-        ratings = stats.get("ratings", [])
-        avg = stats.get("avg_rating", 0)
-        text = f"⭐ <b>Рейтинг проекта</b>\n\nСредняя оценка: {avg:.1f} / 5.0\nВсего оценок: {len(ratings)}\n\n"
-        if ratings:
-            text += "📊 <b>Распределение:</b>\n"
-            for i in range(5, 0, -1):
-                count = sum(1 for r in ratings if r["rating"] == i)
-                percent = count / len(ratings) * 100 if ratings else 0
-                text += f"{'⭐' * i} {i} — {count} ({percent:.1f}%)\n"
-        edit_message(chat_id, message_id, text, reply_markup=kb_admin())
-    elif data == "admin_stats":
-        stats = load_stats()
-        text = (
-            "📊 <b>Статистика бота</b>\n\n"
-            f"👥 Пользователей: {len(stats.get('users', []))}\n"
-            f"📁 Запросов подписок (маленькая): {stats.get('sub_small', 0)}\n"
-            f"📁 Запросов подписок (большая): {stats.get('sub_big', 0)}\n"
-            f"🔑 Запросов Lite ключей: {stats.get('lite_requests', 0)}\n"
-            f"🔑 Запросов Full ключей: {stats.get('full_requests', 0)}\n"
-            f"🌍 Прокси Россия: {stats.get('proxy_ru', 0)}\n"
-            f"🌍 Прокси Европа: {stats.get('proxy_eu', 0)}\n"
-            f"🌍 Прокси Все страны: {stats.get('proxy_all', 0)}\n"
-            f"💝 Пожертвований ключей: {len(stats.get('donations', []))}\n"
-            f"⭐ Оценок проекта: {len(stats.get('ratings', []))}\n"
-        )
-        edit_message(chat_id, message_id, text, reply_markup=kb_admin())
-    elif data == "admin_users":
-        stats = load_stats()
-        users = stats.get("users", [])
-        text = f"👥 <b>Пользователи</b>\n\nВсего: {len(users)}\n\n"
-        if users:
-            for u in users[:20]:
-                text += f"• {u}\n"
-            if len(users) > 20:
-                text += f"\n... и еще {len(users) - 20} пользователей"
-        edit_message(chat_id, message_id, text, reply_markup=kb_admin())
+    elif data.startswith("rate_"):
+        score = int(data.split("_")[1])
+        save_rating(user_id, score)
+        log_action(user, f"⭐ ОЦЕНИЛ ПРОЕКТ: {score}")
+        edit_message(chat_id, message_id, f"🙏 Спасибо за оценку: {'⭐' * score}", reply_markup=None)
+
+    elif data == "admin_settings":
+        if user_id != ADMIN_ID:
+            return
+        text = get_rating_text() + "\n\n" + get_stats_text()
+        edit_message(chat_id, message_id, text, reply_markup=kb_admin_settings())
 
 # ===== MAIN =====
+
 def main():
     print("🤖 Бот FreeCFGHub запущен", flush=True)
     set_bot_commands()
