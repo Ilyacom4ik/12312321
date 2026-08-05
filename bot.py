@@ -41,6 +41,10 @@ REQUIRED_CHANNELS = [
 PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-FreeCFGHub-06-03"
 TERMS_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-FreeCFGHub-06-03"
 
+# ===== КЭШ ПОДПИСОК (запоминаем проверенных пользователей) =====
+# <--- НОВОЕ
+verified_users = set()
+
 # ===== ЛОГГЕР =====
 def log_action(user, action, details=""):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -100,8 +104,18 @@ def add_user(user_id):
         stats["users"] = users
         save_stats(stats)
 
-# ===== ПРОВЕРКА ПОДПИСКИ =====
+# ===== ПРОВЕРКА ПОДПИСКИ (с кэшем) =====
+# <--- ИЗМЕНЕНО
+def is_user_verified(user_id):
+    """Проверяет, есть ли пользователь в кэше已验证"""
+    return user_id in verified_users
+
 def check_subscription(user_id):
+    """Проверяет подписку на каналы (с кэшированием)"""
+    # Если уже проверен — пропускаем
+    if is_user_verified(user_id):
+        return True
+    
     for channel in REQUIRED_CHANNELS:
         channel_id = channel["id"]
         try:
@@ -117,6 +131,9 @@ def check_subscription(user_id):
         except Exception as e:
             print(f"Ошибка проверки подписки на {channel_id}: {e}", flush=True)
             return False
+    
+    # Если дошли сюда — подписка есть, добавляем в кэш
+    verified_users.add(user_id)
     return True
 
 def get_subscription_keyboard():
@@ -242,7 +259,7 @@ TEXT_SUPPORT = (
     "📱 <b>Telegram:</b> @Ilyacom4ik\n"
     "📧 <b>Email:</b> FreeCFGHub@Gmail.com\n\n"
     "⏱ Время ответа: до 24 часов\n\n"
-    "📢 {CHANNEL_URL}"
+    f"📢 {CHANNEL_URL}"
 )
 
 TEXT_DONATE = (
@@ -391,19 +408,7 @@ def handle_message(msg):
     if user_id:
         add_user(user_id)
 
-    # Проверка подписки (кроме /start)
-    if not check_subscription(user_id) and text != "/start":
-        send_message(
-            chat_id,
-            "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
-            f"📢 {CHANNEL_URL}\n"
-            f"📢 {CHANNEL_MIX_URL}\n\n"
-            "После подписки нажмите кнопку ниже 👇",
-            reply_markup=get_subscription_keyboard()
-        )
-        return
-
-    # АДМИН-КОМАНДЫ
+    # ===== АДМИН-КОМАНДЫ (всегда работают) =====
     if user_id == ADMIN_ID:
         if text.startswith("/broadcast "):
             msg_text = text[11:].strip()
@@ -416,6 +421,34 @@ def handle_message(msg):
         if text == "/admin":
             log_action(user, "⚙️ ОТКРЫЛ ПАНЕЛЬ АДМИНИСТРАТОРА")
             send_message(chat_id, "⚙️ <b>Панель администратора</b>", reply_markup=kb_admin())
+            return
+
+    # <--- ИЗМЕНЕНО: проверка подписки с кэшем
+    # Если пользователь уже верифицирован - пропускаем проверку
+    if not is_user_verified(user_id):
+        # Проверяем подписку
+        if not check_subscription(user_id):
+            # Если не подписан - показываем кнопки подписки
+            if text != "/start":
+                send_message(
+                    chat_id,
+                    "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
+                    f"📢 {CHANNEL_URL}\n"
+                    f"📢 {CHANNEL_MIX_URL}\n\n"
+                    "После подписки нажмите кнопку ниже 👇",
+                    reply_markup=get_subscription_keyboard()
+                )
+            else:
+                # Для /start показываем приветствие с кнопками подписки
+                send_message(
+                    chat_id,
+                    f"Привет, {name} 👋\n\n"
+                    "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
+                    f"📢 {CHANNEL_URL}\n"
+                    f"📢 {CHANNEL_MIX_URL}\n\n"
+                    "После подписки нажмите кнопку ниже 👇",
+                    reply_markup=get_subscription_keyboard()
+                )
             return
 
     # Добровольная помощь (отправка ключей)
@@ -437,18 +470,7 @@ def handle_message(msg):
 
     if text == "/start":
         log_action(user, "🚀 ЗАПУСТИЛ БОТА")
-        if not check_subscription(user_id):
-            send_message(
-                chat_id,
-                f"Привет, {name} 👋\n\n"
-                "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
-                f"📢 {CHANNEL_URL}\n"
-                f"📢 {CHANNEL_MIX_URL}\n\n"
-                "После подписки нажмите кнопку ниже 👇",
-                reply_markup=get_subscription_keyboard()
-            )
-        else:
-            send_message(chat_id, text_welcome(name), reply_markup=kb_main())
+        send_message(chat_id, text_welcome(name), reply_markup=kb_main())
     elif text == "/sub":
         log_action(user, "📁 ОТКРЫЛ МЕНЮ ПОДПИСОК")
         send_message(chat_id, TEXT_SUB_MENU, reply_markup=kb_subscriptions())
@@ -482,20 +504,23 @@ def handle_callback(cb):
 
     answer_callback(cb["id"])
 
-    # Проверка подписки для всех callback
-    if not check_subscription(user_id):
-        send_message(
-            chat_id,
-            "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
-            f"📢 {CHANNEL_URL}\n"
-            f"📢 {CHANNEL_MIX_URL}\n\n"
-            "После подписки нажмите кнопку ниже 👇",
-            reply_markup=get_subscription_keyboard()
-        )
-        return
+    # <--- ИЗМЕНЕНО: проверка подписки с кэшем
+    if not is_user_verified(user_id):
+        if data != "check_sub":
+            send_message(
+                chat_id,
+                "⚠️ <b>Для использования бота необходимо подписаться на каналы:</b>\n\n"
+                f"📢 {CHANNEL_URL}\n"
+                f"📢 {CHANNEL_MIX_URL}\n\n"
+                "После подписки нажмите кнопку ниже 👇",
+                reply_markup=get_subscription_keyboard()
+            )
+            return
 
     if data == "check_sub":
         if check_subscription(user_id):
+            # <--- НОВОЕ: добавляем в кэш
+            verified_users.add(user_id)
             edit_message(chat_id, message_id, "✅ <b>Подписка подтверждена!</b>\n\n" + text_welcome(name), reply_markup=kb_main())
         else:
             edit_message(chat_id, message_id, "❌ <b>Вы не подписаны на все каналы!</b>\n\nПожалуйста, подпишитесь:", reply_markup=get_subscription_keyboard())
@@ -620,8 +645,7 @@ def handle_callback(cb):
         stats = load_stats()
         users = stats.get("users", [])
         text = f"👥 <b>Пользователи</b>\n\nВсего: {len(users)}\n\n"
-        if len(users) > 0:
-            # Показываем первых 20 пользователей
+        if users:
             for u in users[:20]:
                 text += f"• {u}\n"
             if len(users) > 20:
