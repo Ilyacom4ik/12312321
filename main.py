@@ -6,6 +6,7 @@ import re
 import json
 import random
 import requests
+import base64
 from datetime import datetime
 
 BOT_TOKEN = os.environ['TG_BOT_TOKEN']
@@ -16,13 +17,9 @@ SMALL_SUB_URL = "https://raw.githubusercontent.com/Ilyacom4ik/free-v2ray-2026/re
 BIG_SUB_URL = "https://raw.githubusercontent.com/Ilyacom4ik/vpn-keys/refs/heads/main/allkeysFreeCFGHub.txt"
 KEYS_SOURCE_URL = "https://raw.githubusercontent.com/Ilyacom4ik/vpn-keys/refs/heads/main/allkeysFreeCFGHub.txt"
 
-# ===== ПРОКСИ =====
-PROXY_RU_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_ru.txt"
-PROXY_EU_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_eu.txt"
-PROXY_ALL_URL = "https://raw.githubusercontent.com/Ilyacom4ik/TGPROXY/refs/heads/main/proxy_all.txt"
-
 SUPPORT_URL = "https://pay.cloudtips.ru/p/2486fa1a"
 CHANNEL_URL = "https://t.me/FreeCFGHub"
+CHANNEL_MIX_URL = "https://t.me/FreeCFGHubMIX"
 LITE_KEYS_COUNT = 5
 FULL_KEYS_COUNT = 7
 
@@ -42,12 +39,29 @@ SUPPORT_EMAIL = "FreeCFGHub@Gmail.com"
 PRIVACY_URL = "https://telegra.ph/Politika-konfidencialnosti-FreeCFGHub-06-03"
 TERMS_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-FreeCFGHub-06-03"
 
-# Ключи-протоколы, которые принимаем при добровольной отправке
 KEY_PROTOCOL_RE = re.compile(r'^(vless|vmess|trojan|ss|tuic|hysteria2)://', re.IGNORECASE)
+HAPP_RE = re.compile(r'^(happcrypt://|happ://)', re.IGNORECASE)
 
-# Временное состояние пользователей в памяти (не переживает перезапуск)
-# uid -> "waiting_key" | None
 user_state = {}
+
+# ===== СОСТОЯНИЕ БОТА =====
+BOT_STATUS_FILE = "bot_status.json"
+
+def load_bot_status():
+    try:
+        with open(BOT_STATUS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f).get("enabled", True)
+    except:
+        return True
+
+def save_bot_status(enabled):
+    try:
+        with open(BOT_STATUS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({"enabled": enabled}, f)
+    except:
+        pass
+
+BOT_ENABLED = load_bot_status()
 
 # ===== ЛОГГЕР =====
 def log_action(user, action, details=""):
@@ -78,11 +92,9 @@ def load_stats():
     data.setdefault("full_requests", 0)
     data.setdefault("sub_small", 0)
     data.setdefault("sub_big", 0)
-    data.setdefault("proxy_ru", 0)
-    data.setdefault("proxy_eu", 0)
-    data.setdefault("proxy_all", 0)
     data.setdefault("users", [])
     data.setdefault("ratings", {"sum": 0, "count": 0, "users": {}})
+    data.setdefault("happ_requests", 0)
     return data
 
 def save_stats(stats):
@@ -147,9 +159,7 @@ def get_stats_text():
         f"🏴 Full запросов: {stats.get('full_requests', 0)}\n"
         f"📦 Небольшая подписка: {stats.get('sub_small', 0)}\n"
         f"🗂 Большая подписка: {stats.get('sub_big', 0)}\n"
-        f"🇷🇺 Прокси RU: {stats.get('proxy_ru', 0)}\n"
-        f"🇪🇺 Прокси EU: {stats.get('proxy_eu', 0)}\n"
-        f"🌍 Прокси ALL: {stats.get('proxy_all', 0)}\n"
+        f"🔓 HAPP запросов: {stats.get('happ_requests', 0)}\n"
     )
 
 def broadcast_message(text):
@@ -165,8 +175,103 @@ def broadcast_message(text):
             failed += 1
     return sent, failed
 
-# ===== ФУНКЦИИ TELEGRAM API =====
+# ===== HAPP CRYPT ДЕКОДЕР =====
+def happ_decrypt_v1(data):
+    try:
+        encoded = data.split("://")[1]
+        if "/v1/" in data:
+            encoded = data.split("/v1/")[1]
+        decoded = base64.b64decode(encoded[::-1]).decode('utf-8')
+        return decoded
+    except Exception as e:
+        return f"Ошибка v1: {e}"
 
+def happ_decrypt_v2(data):
+    try:
+        encoded = data.split("://")[1]
+        if "/v2/" in data:
+            encoded = data.split("/v2/")[1]
+        decoded_bytes = base64.b64decode(encoded)
+        result = bytes([b ^ 0x55 for b in decoded_bytes])
+        return result.decode('utf-8')
+    except Exception as e:
+        return f"Ошибка v2: {e}"
+
+def happ_decrypt_v3(data):
+    try:
+        encoded = data.split("://")[1]
+        if "/v3/" in data:
+            encoded = data.split("/v3/")[1]
+        decoded = base64.b64decode(encoded).decode('utf-8')
+        result = ""
+        for char in decoded:
+            if 'a' <= char <= 'z':
+                result += chr((ord(char) - ord('a') - 3) % 26 + ord('a'))
+            elif 'A' <= char <= 'Z':
+                result += chr((ord(char) - ord('A') - 3) % 26 + ord('A'))
+            else:
+                result += char
+        return result
+    except Exception as e:
+        return f"Ошибка v3: {e}"
+
+def happ_decrypt_v4(data):
+    try:
+        encoded = data.split("://")[1]
+        if "/v4/" in data:
+            encoded = data.split("/v4/")[1]
+        decoded = base64.b64decode(encoded).decode('utf-8')
+        result = ""
+        for char in decoded:
+            if 'a' <= char <= 'z':
+                result += chr((ord(char) - ord('a') + 13) % 26 + ord('a'))
+            elif 'A' <= char <= 'Z':
+                result += chr((ord(char) - ord('A') + 13) % 26 + ord('A'))
+            else:
+                result += char
+        return result
+    except Exception as e:
+        return f"Ошибка v4: {e}"
+
+def happ_decrypt_v5(data):
+    try:
+        encoded = data.split("://")[1]
+        if "/v5/" in data:
+            encoded = data.split("/v5/")[1]
+        decoded_bytes = base64.b64decode(encoded)
+        reversed_bytes = decoded_bytes[::-1]
+        result = bytes([b ^ 0xAA for b in reversed_bytes])
+        return result.decode('utf-8')
+    except Exception as e:
+        return f"Ошибка v5: {e}"
+
+def happ_decrypt(data):
+    if "v1/" in data:
+        return happ_decrypt_v1(data)
+    elif "v2/" in data:
+        return happ_decrypt_v2(data)
+    elif "v3/" in data:
+        return happ_decrypt_v3(data)
+    elif "v4/" in data:
+        return happ_decrypt_v4(data)
+    elif "v5/" in data:
+        return happ_decrypt_v5(data)
+    
+    results = {
+        "v1": happ_decrypt_v1(data),
+        "v2": happ_decrypt_v2(data),
+        "v3": happ_decrypt_v3(data),
+        "v4": happ_decrypt_v4(data),
+        "v5": happ_decrypt_v5(data)
+    }
+    
+    for version, result in results.items():
+        if not result.startswith("Ошибка"):
+            return f"[{version}] {result}"
+    
+    return "❌ Не удалось расшифровать HAPP Crypt"
+
+# ===== API =====
 def get_updates(offset=None):
     params = {"timeout": 30}
     if offset:
@@ -219,15 +324,12 @@ def get_chat_member(channel_username, user_id):
         }, timeout=10)
         data = r.json()
         if not data.get("ok"):
-            print(f"getChatMember ошибка для {channel_username}: {data}", flush=True)
             return None
         return data["result"].get("status")
-    except Exception as e:
-        print(f"Ошибка get_chat_member: {e}", flush=True)
+    except Exception:
         return None
 
 def is_subscribed(user_id):
-    """Проверяет подписку пользователя на все обязательные каналы."""
     for ch in REQUIRED_CHANNELS:
         status = get_chat_member(ch["username"], user_id)
         if status not in ("member", "administrator", "creator"):
@@ -239,9 +341,8 @@ def set_bot_commands():
         {"command": "start", "description": "🏠 Главное меню"},
         {"command": "sub", "description": "📁 Получить подписку"},
         {"command": "keys", "description": "🔑 Получить ключи"},
-        {"command": "proxy", "description": "🌍 Прокси для Telegram"},
-        {"command": "status", "description": "📡 Статус"},
         {"command": "support", "description": "🆘 Поддержка"},
+        {"command": "status", "description": "📡 Статус"},
         {"command": "help", "description": "ℹ️ Справка"},
         {"command": "broadcast", "description": "📢 Рассылка (админ)"},
     ]
@@ -249,70 +350,103 @@ def set_bot_commands():
     print("✅ Команды меню установлены", flush=True)
 
 # ===== ТЕКСТЫ =====
-
 def text_welcome(name):
     return (
         f"Привет, {name} 👋\n\n"
-        "🆓 Здесь ты получишь ключи, подписки и прокси для Telegram.\n\n"
+        "🆓 Здесь ты получишь качественные конфигурации для обхода блокировок от канала FreeCFGHub.\n\n"
         "📁 <b>Команды:</b>\n"
         "/sub — получить подписку\n"
         "/keys — получить ключи\n"
-        "/proxy — прокси для Telegram\n"
+        "/support — поддержка\n"
         "/status — статус подписки\n"
-        "/support — поддержка\n\n"
+        "/help — справка\n\n"
+        "💡 Все конфигурации обновляются вручную и проверяются на работоспособность.\n\n"
         f"📢 {CHANNEL_URL}"
     )
 
-TEXT_SUB_MENU = "🔶 <b>Выберите тип подписки</b>"
-TEXT_KEYS_MENU = "🔷 <b>Выберите тип ключа</b>"
-TEXT_HELP = "📜 <b>Справка</b>\n\n/sub — подписка\n/keys — ключи\n/proxy — прокси\n/support — поддержка\n/status — статус"
-TEXT_STATUS_LOADING = "⏳ Проверяю..."
+TEXT_SUB_MENU = (
+    "🔶 <b>Выберите тип подписки</b>\n\n"
+    "📦 <b>Небольшая подписка</b>\n"
+    "✅ Подходит для всех известных клиентов и устройств\n"
+    "✅ Оптимальна для повседневного использования\n\n"
+    "🗂 <b>Большая подписка</b>\n"
+    "⚠️ Не подходит для слабых устройств\n"
+    "⚠️ Не подходит для клиентов: v2rayTun, HAPP, Incy\n"
+    "✅ Рекомендуемые клиенты: Hiddify, v2rayNG, NekoBox и др.\n"
+    "✅ Для продвинутых пользователей\n\n"
+    "💡 <i>Выберите подходящий вариант:</i>"
+)
+
+TEXT_KEYS_MENU = (
+    "🔷 <b>Выберите тип ключей</b>\n\n"
+    "🏳️ <b>Lite</b> — 5 ключей\n"
+    "📱 Только для мобильного интернета\n"
+    "✅ Используются при ограничении мобильного трафика\n"
+    "✅ Экономичный режим\n\n"
+    "🏴 <b>Full</b> — 7 ключей\n"
+    "🌍 Как обычный зарубежный трафик\n"
+    "✅ Максимальная скорость и стабильность\n"
+    "✅ Для любых задач\n\n"
+    "💡 <i>Выберите подходящий вариант:</i>"
+)
+
+TEXT_HELP = (
+    "📜 <b>Справка</b>\n\n"
+    "/sub — получить подписку\n"
+    "/keys — получить ключи\n"
+    "/support — поддержка\n"
+    "/status — статус подписки\n"
+    "/help — эта справка\n\n"
+    "🔓 <b>HAPP Crypt Decrypt</b>\n"
+    "Просто отправь ссылку вида happcrypt:// или happ://\n"
+    "Поддерживаются версии 1-5\n\n"
+    f"📢 {CHANNEL_URL}"
+)
+
+TEXT_SUPPORT = (
+    "🆘 <b>Поддержка</b>\n\n"
+    f"По всем вопросам пиши: {SUPPORT_USERNAME}\n"
+    f"Либо на почту: {SUPPORT_EMAIL}\n\n"
+    "📜 <b>Документы:</b>\n"
+    f"• <a href='{PRIVACY_URL}'>Политика конфиденциальности</a>\n"
+    f"• <a href='{TERMS_URL}'>Пользовательское соглашение</a>"
+)
 
 TEXT_NEED_SUBSCRIPTION = (
     "🔒 <b>Доступ ограничен</b>\n\n"
-    "Чтобы пользоваться ботом, подпишись на наши каналы, а затем нажми "
-    "«✅ Я подписался»."
+    "Чтобы пользоваться ботом, подпишись на наши каналы:\n\n"
+    f"📢 {CHANNEL_URL}\n"
+    f"📢 {CHANNEL_MIX_URL}\n\n"
+    "После подписки нажми «✅ Я подписался»."
 )
 
-TEXT_SHARE_KEY_PROMPT = (
-    "🎁 <b>Поделиться ключом</b>\n\n"
-    "Пришли ключ одним сообщением. Поддерживаются протоколы:\n"
-    "<code>vless://</code>, <code>vmess://</code>, <code>trojan://</code>, "
-    "<code>ss://</code>, <code>tuic://</code>, <code>hysteria2://</code>\n\n"
-    "Чтобы отменить — нажми «◀️ Назад»."
+TEXT_STATUS_LOADING = "⏳ Проверяю..."
+
+TEXT_BOT_OFF = (
+    "⛔ <b>Бот на техническом перерыве</b>\n\n"
+    "Ведутся технические работы. Бот временно недоступен.\n"
+    "Пожалуйста, зайдите позже.\n\n"
+    "⏱ Ориентировочное время: до 1 часа\n\n"
+    f"📢 {CHANNEL_URL}"
 )
 
-TEXT_SHARE_KEY_THANKS = "🙏 Спасибо! Ключ отправлен на проверку админу."
-TEXT_SHARE_KEY_BAD_FORMAT = (
-    "⚠️ Не похоже на ключ поддерживаемого протокола. Пришли ссылку, "
-    "начинающуюся с vless://, vmess://, trojan://, ss://, tuic:// или hysteria2://, "
-    "либо нажми «◀️ Назад»."
-)
-
-def text_support():
+def get_status_text():
+    keys_data, error = fetch_and_parse_keys()
+    if error:
+        return f"❌ Ошибка: {error}"
+    stats = load_stats()
+    ratings = stats.get("ratings", {})
+    avg = (ratings.get("sum", 0) / ratings.get("count", 1)) if ratings.get("count", 0) else 0
     return (
-        "🆘 <b>Поддержка</b>\n\n"
-        f"По всем вопросам пиши сюда: {SUPPORT_USERNAME}\n"
-        f"Либо на почту: {SUPPORT_EMAIL}"
+        f"📊 <b>Статус подписки</b>\n\n"
+        f"🏳️ Lite ключей: {len(keys_data.get('lite', []))}\n"
+        f"🏴 Full ключей: {len(keys_data.get('full', []))}\n"
+        f"⭐ Рейтинг: {avg:.1f} / 5.0\n"
+        f"👥 Пользователей: {len(stats.get('users', []))}\n\n"
+        f"📢 {CHANNEL_URL}"
     )
 
 # ===== ЗАГРУЗКА =====
-
-def fetch_proxies_from_url(url):
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200:
-            proxies = []
-            for line in r.text.splitlines():
-                line = line.strip()
-                if line.startswith("tg://proxy?"):
-                    proxies.append(line)
-            return proxies
-        return []
-    except Exception as e:
-        print(f"Ошибка загрузки прокси: {e}", flush=True)
-        return []
-
 def fetch_and_parse_keys():
     try:
         r = requests.get(KEYS_SOURCE_URL, timeout=15)
@@ -339,31 +473,23 @@ def get_random_keys(keys_list, count):
         return []
     return random.sample(keys_list, min(count, len(keys_list)))
 
-def get_status_text():
-    keys_data, error = fetch_and_parse_keys()
-    if error:
-        return f"❌ Ошибка: {error}"
-    return (
-        f"📊 <b>Статус подписки</b>\n\n"
-        f"🏳️ Lite ключей: {len(keys_data.get('lite', []))}\n"
-        f"🏴 Full ключей: {len(keys_data.get('full', []))}\n\n"
-        f"📢 {CHANNEL_URL}"
-    )
-
 # ===== КЛАВИАТУРЫ =====
-
 def kb_main(user_id=None):
     rows = [
         [{"text": "📁 Получить подписку", "callback_data": "menu_sub"}],
         [{"text": "🔑 Получить ключи", "callback_data": "menu_keys"}],
-        [{"text": "🌍 Прокси для Telegram", "callback_data": "menu_proxy"}],
         [{"text": "🎁 Поделиться ключом", "callback_data": "share_key"}],
+        [{"text": "⭐ Оценить проект", "callback_data": "rate_project"}],
         [{"text": "💳 Поддержать канал", "url": SUPPORT_URL}],
         [{"text": "🆘 Поддержка", "callback_data": "menu_support"}, {"text": "ℹ️ Справка", "callback_data": "menu_help"}],
         [{"text": "🔒 Конфиденциальность", "url": PRIVACY_URL}, {"text": "📄 Соглашение", "url": TERMS_URL}],
     ]
     if user_id == ADMIN_ID:
-        rows.append([{"text": "⚙️ Настройки (админ)", "callback_data": "admin_settings"}])
+        status_text = "🔴 Выключить" if BOT_ENABLED else "🟢 Включить"
+        rows.append([
+            {"text": "⚙️ Настройки (админ)", "callback_data": "admin_settings"},
+            {"text": status_text, "callback_data": "admin_toggle"}
+        ])
     return {"inline_keyboard": rows}
 
 def kb_subscribe_required():
@@ -383,17 +509,7 @@ def kb_subscriptions():
 def kb_keys():
     return {
         "inline_keyboard": [
-            [{"text": "Lite", "callback_data": "keys_lite"}, {"text": "Full", "callback_data": "keys_full"}],
-            [{"text": "◀️ Назад", "callback_data": "back_main"}],
-        ]
-    }
-
-def kb_proxy_countries():
-    return {
-        "inline_keyboard": [
-            [{"text": "🇷🇺 Россия", "callback_data": "proxy_ru"}],
-            [{"text": "🇪🇺 Европа", "callback_data": "proxy_eu"}],
-            [{"text": "🌍 Все страны", "callback_data": "proxy_all"}],
+            [{"text": "🏳️ Lite", "callback_data": "keys_lite"}, {"text": "🏴 Full", "callback_data": "keys_full"}],
             [{"text": "◀️ Назад", "callback_data": "back_main"}],
         ]
     }
@@ -406,13 +522,12 @@ def kb_share_key():
 
 def kb_rating():
     return {
-        "inline_keyboard": [[
-            {"text": "⭐", "callback_data": "rate_1"},
-            {"text": "⭐⭐", "callback_data": "rate_2"},
-            {"text": "⭐⭐⭐", "callback_data": "rate_3"},
-            {"text": "⭐⭐⭐⭐", "callback_data": "rate_4"},
-            {"text": "⭐⭐⭐⭐⭐", "callback_data": "rate_5"},
-        ]]
+        "inline_keyboard": [
+            [{"text": "⭐", "callback_data": "rate_1"}, {"text": "⭐⭐", "callback_data": "rate_2"}],
+            [{"text": "⭐⭐⭐", "callback_data": "rate_3"}, {"text": "⭐⭐⭐⭐", "callback_data": "rate_4"}],
+            [{"text": "⭐⭐⭐⭐⭐", "callback_data": "rate_5"}],
+            [{"text": "◀️ Назад", "callback_data": "back_main"}],
+        ]
     }
 
 def kb_admin_settings():
@@ -423,9 +538,8 @@ def kb_admin_settings():
     }
 
 # ===== ОБРАБОТКА =====
-
 def send_rating_prompt(chat_id):
-    send_message(chat_id, "Оцени проект, пожалуйста 🙏", reply_markup=kb_rating())
+    send_message(chat_id, "⭐ <b>Оцените наш проект</b>\n\nНасколько вам понравился бот?", reply_markup=kb_rating())
 
 def handle_message(msg):
     chat_id = msg.get("chat", {}).get("id")
@@ -440,35 +554,51 @@ def handle_message(msg):
     if user_id:
         add_user(user_id)
 
-    # ===== АДМИН-КОМАНДЫ (без проверки подписки) =====
+    # ===== АДМИН (всегда работает, даже при выключенном боте) =====
     if user_id == ADMIN_ID:
         if text.startswith("/broadcast "):
             msg_text = text[11:].strip()
             if msg_text:
                 sent, failed = broadcast_message(msg_text)
-                send_message(chat_id, f"✅ Рассылка отправлена: {sent} доставлено, {failed} не доставлено")
+                send_message(chat_id, f"✅ Рассылка: {sent} доставлено, {failed} не доставлено")
             else:
-                send_message(chat_id, "⚠️ Используйте: /broadcast [текст сообщения]")
+                send_message(chat_id, "⚠️ Используйте: /broadcast [текст]")
             return
 
-    # ===== ОБРАБОТКА ОЖИДАЕМОГО ВВОДА (добровольная отправка ключа) =====
+    # ===== ПРОВЕРКА СОСТОЯНИЯ БОТА =====
+    global BOT_ENABLED
+    if not BOT_ENABLED and user_id != ADMIN_ID:
+        send_message(chat_id, TEXT_BOT_OFF)
+        return
+
+    # ===== HAPP CRYPT =====
+    if HAPP_RE.match(text.strip()):
+        log_action(user, "🔓 HAPP CRYPT ЗАПРОС")
+        increment_stat("happ_requests")
+        result = happ_decrypt(text.strip())
+        send_message(
+            chat_id,
+            f"🔓 <b>HAPP Crypt Decoder</b>\n\n"
+            f"📥 <b>Вход:</b>\n<code>{text[:80]}...</code>\n\n"
+            f"📤 <b>Результат:</b>\n<code>{result}</code>"
+        )
+        return
+
+    # ===== ОЖИДАНИЕ КЛЮЧА =====
     if user_state.get(user_id) == "waiting_key" and text and not text.startswith("/"):
         if KEY_PROTOCOL_RE.match(text.strip()):
             user_state[user_id] = None
-            try:
-                with open(SHARED_KEYS_FILE, 'a', encoding='utf-8') as f:
-                    f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {user_str_from(user)}: {text.strip()}\n")
-            except Exception as e:
-                print(f"Ошибка записи shared_keys: {e}", flush=True)
+            with open(SHARED_KEYS_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {user_str_from(user)}: {text.strip()}\n")
             log_action(user, "🎁 ПРЕДЛОЖИЛ КЛЮЧ", text.strip())
-            send_message(ADMIN_ID, f"🎁 <b>Новый ключ от пользователя</b>\n\n{user_str_from(user)}\n\n<code>{text.strip()}</code>")
-            send_message(chat_id, TEXT_SHARE_KEY_THANKS, reply_markup=kb_back())
+            send_message(ADMIN_ID, f"🎁 <b>Новый ключ</b>\n\n{user_str_from(user)}\n\n<code>{text.strip()}</code>")
+            send_message(chat_id, "🙏 Спасибо! Ключ отправлен на проверку админу.", reply_markup=kb_back())
         else:
-            send_message(chat_id, TEXT_SHARE_KEY_BAD_FORMAT, reply_markup=kb_share_key())
+            send_message(chat_id, "⚠️ Не похоже на ключ. Пришли vless://, vmess://, trojan://, ss://, tuic:// или hysteria2://", reply_markup=kb_share_key())
         return
 
-    # ===== ПРОВЕРКА ОБЯЗАТЕЛЬНОЙ ПОДПИСКИ =====
-    if user_id != ADMIN_ID and text in ("/start", "/sub", "/keys", "/proxy", "/status", "/support", "/help", "/info"):
+    # ===== ПРОВЕРКА ПОДПИСКИ =====
+    if user_id != ADMIN_ID and text in ("/start", "/sub", "/keys", "/support", "/status", "/help"):
         if not is_subscribed(user_id):
             send_message(chat_id, TEXT_NEED_SUBSCRIPTION, reply_markup=kb_subscribe_required())
             return
@@ -482,21 +612,19 @@ def handle_message(msg):
     elif text == "/keys":
         log_action(user, "🔑 ОТКРЫЛ МЕНЮ КЛЮЧЕЙ")
         send_message(chat_id, TEXT_KEYS_MENU, reply_markup=kb_keys())
-    elif text == "/proxy":
-        log_action(user, "🌍 ОТКРЫЛ МЕНЮ ПРОКСИ")
-        send_message(chat_id, "🌍 Выберите регион:", reply_markup=kb_proxy_countries())
+    elif text == "/support":
+        log_action(user, "🆘 ОТКРЫЛ ПОДДЕРЖКУ")
+        send_message(chat_id, TEXT_SUPPORT, reply_markup=kb_back())
     elif text == "/status":
         log_action(user, "📡 ЗАПРОСИЛ СТАТУС")
         send_message(chat_id, TEXT_STATUS_LOADING)
         send_message(chat_id, get_status_text())
-    elif text == "/support":
-        log_action(user, "🆘 ОТКРЫЛ ПОДДЕРЖКУ")
-        send_message(chat_id, text_support(), reply_markup=kb_back())
     elif text in ("/help", "/info"):
         log_action(user, "ℹ️ ОТКРЫЛ СПРАВКУ")
         send_message(chat_id, TEXT_HELP, reply_markup=kb_back())
 
 def handle_callback(cb):
+    global BOT_ENABLED
     chat_id = cb["message"]["chat"]["id"]
     message_id = cb["message"]["message_id"]
     data = cb.get("data", "")
@@ -506,15 +634,37 @@ def handle_callback(cb):
 
     answer_callback(cb["id"])
 
+    # ===== АДМИН: ВКЛЮЧЕНИЕ/ВЫКЛЮЧЕНИЕ БОТА =====
+    if data == "admin_toggle" and user_id == ADMIN_ID:
+        BOT_ENABLED = not BOT_ENABLED
+        save_bot_status(BOT_ENABLED)
+        status_text = "🔴 ВЫКЛЮЧЕН" if not BOT_ENABLED else "🟢 ВКЛЮЧЕН"
+        log_action(user, f"⚙️ ИЗМЕНИЛ СТАТУС БОТА: {status_text}")
+        # Обновляем меню
+        edit_message(chat_id, message_id, text_welcome(name), reply_markup=kb_main(user_id))
+        # Отправляем уведомление
+        send_message(chat_id, f"⚙️ <b>Статус бота изменён</b>\n\nБот {status_text}")
+        
+        # Если бот выключен — уведомляем всех пользователей
+        if not BOT_ENABLED:
+            broadcast_message("⛔ <b>Технический перерыв</b>\n\nБот временно недоступен. Ведутся технические работы. Приносим извинения за неудобства.")
+        else:
+            broadcast_message("🟢 <b>Бот снова в сети!</b>\n\nВсе технические работы завершены. Бот доступен для использования.")
+        return
+
     if data == "check_sub":
         if is_subscribed(user_id):
             log_action(user, "✅ ПОДТВЕРДИЛ ПОДПИСКУ")
             edit_message(chat_id, message_id, text_welcome(name), reply_markup=kb_main(user_id))
         else:
-            answer_callback(cb["id"], "❌ Подписка не найдена. Подпишись на оба канала и попробуй снова.", show_alert=True)
+            answer_callback(cb["id"], "❌ Подписка не найдена.", show_alert=True)
         return
 
-    # Проверка подписки для всех остальных действий (кроме админа)
+    # ===== БОТ ВЫКЛЮЧЕН =====
+    if not BOT_ENABLED and user_id != ADMIN_ID:
+        edit_message(chat_id, message_id, TEXT_BOT_OFF)
+        return
+
     if user_id != ADMIN_ID and not is_subscribed(user_id):
         edit_message(chat_id, message_id, TEXT_NEED_SUBSCRIPTION, reply_markup=kb_subscribe_required())
         return
@@ -530,12 +680,12 @@ def handle_callback(cb):
     elif data == "sub_small":
         log_action(user, "📦 ВЫБРАЛ НЕБОЛЬШУЮ ПОДПИСКУ")
         increment_stat("sub_small")
-        edit_message(chat_id, message_id, f"📦 <b>Небольшая подписка</b>\n\n<code>{SMALL_SUB_URL}</code>", reply_markup=kb_back())
+        edit_message(chat_id, message_id, f"📦 <b>Небольшая подписка</b>\n\n<code>{SMALL_SUB_URL}</code>\n\n✅ Подходит для всех клиентов и устройств.", reply_markup=kb_back())
         send_rating_prompt(chat_id)
     elif data == "sub_big":
         log_action(user, "🗂 ВЫБРАЛ БОЛЬШУЮ ПОДПИСКУ")
         increment_stat("sub_big")
-        edit_message(chat_id, message_id, f"🗂 <b>Большая подписка</b>\n\n<code>{BIG_SUB_URL}</code>", reply_markup=kb_back())
+        edit_message(chat_id, message_id, f"🗂 <b>Большая подписка</b>\n\n<code>{BIG_SUB_URL}</code>\n\n⚠️ Не подходит для v2rayTun, HAPP, Incy\n✅ Рекомендуемые клиенты: Hiddify, v2rayNG, NekoBox", reply_markup=kb_back())
         send_rating_prompt(chat_id)
 
     elif data == "menu_keys":
@@ -545,6 +695,7 @@ def handle_callback(cb):
         key_type = "lite" if data == "keys_lite" else "full"
         count = LITE_KEYS_COUNT if key_type == "lite" else FULL_KEYS_COUNT
         label = "Lite" if key_type == "lite" else "Full"
+        desc = "📱 Только для мобильного интернета. Используются при ограничении мобильного трафика." if key_type == "lite" else "🌍 Как обычный зарубежный трафик. Максимальная скорость."
         log_action(user, f"🔑 ЗАПРОСИЛ КЛЮЧИ {label}")
         increment_stat("lite_requests" if key_type == "lite" else "full_requests")
         edit_message(chat_id, message_id, f"⏳ Загружаю...")
@@ -558,63 +709,40 @@ def handle_callback(cb):
             return
         selected = get_random_keys(keys, count)
         keys_block = "\n\n".join(f"<code>{k}</code>" for k in selected)
-        edit_message(chat_id, message_id, f"🔑 <b>{label} — {len(selected)} шт.</b>\n\n{keys_block}\n\n📢 {CHANNEL_URL}", reply_markup=kb_back())
-        send_rating_prompt(chat_id)
-
-    elif data == "menu_proxy":
-        log_action(user, "🌍 ОТКРЫЛ МЕНЮ ПРОКСИ")
-        edit_message(chat_id, message_id, "🌍 Выберите регион:", reply_markup=kb_proxy_countries())
-    elif data.startswith("proxy_"):
-        region = data.split("_")[1]
-        if region == "ru":
-            url, label = PROXY_RU_URL, "🇷🇺 Россия"
-            increment_stat("proxy_ru")
-        elif region == "eu":
-            url, label = PROXY_EU_URL, "🇪🇺 Европа"
-            increment_stat("proxy_eu")
-        else:
-            url, label = PROXY_ALL_URL, "🌍 Все страны"
-            increment_stat("proxy_all")
-        log_action(user, f"🌍 ЗАПРОСИЛ ПРОКСИ {label}")
-        proxies = fetch_proxies_from_url(url)
-        if not proxies:
-            edit_message(chat_id, message_id, f"❌ Прокси для {label} временно недоступны", reply_markup=kb_proxy_countries())
-            return
-        proxies = proxies[:5]
-        keyboard = [[{"text": f"🔵 Подключиться #{i}", "url": p}] for i, p in enumerate(proxies, 1)]
-        keyboard.append([{"text": "◀️ Назад", "callback_data": "menu_proxy"}])
-        edit_message(chat_id, message_id, f"🌍 <b>MTProto прокси для Telegram</b>\n\n📍 {label}\n📦 Доступно: {len(proxies)}\n\n📢 {CHANNEL_URL}", reply_markup={"inline_keyboard": keyboard})
+        edit_message(chat_id, message_id, f"🔑 <b>{label} — {len(selected)} шт.</b>\n\n{desc}\n\n{keys_block}\n\n📢 {CHANNEL_URL}", reply_markup=kb_back())
         send_rating_prompt(chat_id)
 
     elif data == "share_key":
         log_action(user, "🎁 ОТКРЫЛ ФОРМУ ОТПРАВКИ КЛЮЧА")
         user_state[user_id] = "waiting_key"
-        edit_message(chat_id, message_id, TEXT_SHARE_KEY_PROMPT, reply_markup=kb_share_key())
+        edit_message(chat_id, message_id, "🎁 <b>Поделиться ключом</b>\n\nПришли ключ одним сообщением. Поддерживаются протоколы:\n<code>vless://</code>, <code>vmess://</code>, <code>trojan://</code>, <code>ss://</code>, <code>tuic://</code>, <code>hysteria2://</code>", reply_markup=kb_share_key())
 
     elif data == "menu_support":
         log_action(user, "🆘 ОТКРЫЛ ПОДДЕРЖКУ")
-        edit_message(chat_id, message_id, text_support(), reply_markup=kb_back())
+        edit_message(chat_id, message_id, TEXT_SUPPORT, reply_markup=kb_back())
 
     elif data == "menu_help":
         log_action(user, "ℹ️ ОТКРЫЛ СПРАВКУ")
         edit_message(chat_id, message_id, TEXT_HELP, reply_markup=kb_back())
 
+    elif data == "rate_project":
+        log_action(user, "⭐ ОТКРЫЛ ОЦЕНКУ")
+        edit_message(chat_id, message_id, "⭐ <b>Оцените наш проект</b>\n\nНасколько вам нравится бот? Выберите оценку от 1 до 5:", reply_markup=kb_rating())
+
     elif data.startswith("rate_"):
         score = int(data.split("_")[1])
         save_rating(user_id, score)
-        log_action(user, f"⭐ ОЦЕНИЛ ПРОЕКТ: {score}")
-        edit_message(chat_id, message_id, f"🙏 Спасибо за оценку: {'⭐' * score}", reply_markup=None)
+        log_action(user, f"⭐ ПОСТАВИЛ ОЦЕНКУ: {score}")
+        edit_message(chat_id, message_id, f"🙏 <b>Спасибо за оценку!</b>\n\n{'⭐' * score} {score}/5\n\nВаше мнение очень важно для нас! ❤️", reply_markup=kb_back())
 
-    elif data == "admin_settings":
-        if user_id != ADMIN_ID:
-            return
+    elif data == "admin_settings" and user_id == ADMIN_ID:
         text = get_rating_text() + "\n\n" + get_stats_text()
         edit_message(chat_id, message_id, text, reply_markup=kb_admin_settings())
 
 # ===== MAIN =====
-
 def main():
     print("🤖 Бот FreeCFGHub запущен", flush=True)
+    print(f"📊 Статус бота: {'ВКЛЮЧЕН' if BOT_ENABLED else 'ВЫКЛЮЧЕН'}", flush=True)
     set_bot_commands()
     offset = None
     while True:
