@@ -5,15 +5,8 @@ import os
 import re
 import json
 import random
-import socket
-import subprocess
-import threading
-import time
-import base64
-import urllib.parse as urlparse
 import requests
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BOT_TOKEN = os.environ['TG_BOT_TOKEN']
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -30,15 +23,12 @@ LITE_KEYS_COUNT = 5
 FULL_KEYS_COUNT = 7
 
 # ===== ПЕРСИСТЕНТНОЕ ХРАНИЛИЩЕ =====
-# Смонтируй volume на этот путь в docker-compose (например ./bot-data:/data),
-# иначе после каждого пересобранного образа данные снова обнулятся.
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 STATS_FILE = os.path.join(DATA_DIR, "stats.json")
 SHARED_KEYS_FILE = os.path.join(DATA_DIR, "shared_keys.txt")
 BOT_STATUS_FILE = os.path.join(DATA_DIR, "bot_status.json")
-CHECKED_KEYS_FILE = os.path.join(DATA_DIR, "checked_keys.json")
 
 ADMIN_ID = 1321104939  # Твой Telegram ID
 
@@ -57,33 +47,6 @@ TERMS_URL = "https://telegra.ph/Polzovatelskoe-soglashenie-FreeCFGHub-06-03"
 KEY_PROTOCOL_RE = re.compile(r'^(vless|vmess|trojan|ss|tuic|hysteria2)://', re.IGNORECASE)
 
 user_state = {}
-
-# ===== ПРОВЕРКА КЛЮЧЕЙ (sing-box) =====
-SING_BOX_BIN = os.environ.get("SINGBOX_BIN", "sing-box")
-CHECK_TIMEOUT = 8          # секунд на один тест
-CHECK_CONCURRENCY = 5      # сколько ключей тестировать параллельно
-SINGBOX_STARTUP_DELAY = 1.5
-PING_TEST_URL = "http://www.gstatic.com/generate_204"
-SPEEDTEST_URL = "https://speed.cloudflare.com/__down?bytes=8000000"
-SHOW_KEYS_LIMIT = 15
-MAX_COUNTRY_BUTTONS = 12
-
-# ⚠️ ОТРЕДАКТИРУЙ под свои реальные "белые" SNI-домены (маскировка под доверенные/
-# незаблокированные домены). Это заглушка — я не берусь утверждать, какие домены
-# сейчас в белом списке, сверяйся с актуальным реестром/своими проверенными SNI.
-WHITE_SNI_DOMAINS = {
-    "gosuslugi.ru",
-    "sberbank.ru",
-    "yandex.ru",
-    "vk.com",
-    "mos.ru",
-}
-
-def is_white_sni(sni):
-    if not sni:
-        return False
-    sni = sni.lower().strip()
-    return any(sni == d or sni.endswith("." + d) for d in WHITE_SNI_DOMAINS)
 
 # ===== СОСТОЯНИЕ БОТА =====
 def load_bot_status():
@@ -133,7 +96,6 @@ def load_stats():
     data.setdefault("sub_big", 0)
     data.setdefault("users", [])
     data.setdefault("ratings", {"sum": 0, "count": 0, "users": {}})
-    data.setdefault("checks_run", 0)
     return data
 
 def save_stats(stats):
@@ -198,7 +160,6 @@ def get_stats_text():
         f"🏴 Full запросов: {stats.get('full_requests', 0)}\n"
         f"📦 Небольшая подписка: {stats.get('sub_small', 0)}\n"
         f"🗂 Большая подписка: {stats.get('sub_big', 0)}\n"
-        f"🧪 Проверок ключей: {stats.get('checks_run', 0)}\n"
     )
 
 def broadcast_message(text):
@@ -215,7 +176,6 @@ def broadcast_message(text):
     return sent, failed
 
 def broadcast_raw(text):
-    """Рассылка готового HTML-сообщения без добавления префикса 📢."""
     users = get_all_users()
     sent = 0
     failed = 0
@@ -315,7 +275,6 @@ def set_bot_commands():
         {"command": "start", "description": "🏠 Главное меню"},
         {"command": "sub", "description": "📁 Получить подписку"},
         {"command": "keys", "description": "🔑 Получить ключи"},
-        {"command": "check", "description": "🧪 Проверка ключей"},
         {"command": "support", "description": "🆘 Поддержка"},
         {"command": "status", "description": "📡 Статус"},
         {"command": "help", "description": "ℹ️ Справка"},
@@ -332,7 +291,6 @@ def text_welcome(name):
         "📁 <b>Команды:</b>\n"
         "/sub — получить подписку\n"
         "/keys — получить ключи\n"
-        "/check — проверка ключей\n"
         "/support — поддержка\n"
         "/status — статус подписки\n"
         "/help — справка\n\n"
@@ -366,24 +324,10 @@ TEXT_KEYS_MENU = (
     "💡 <i>Выберите подходящий вариант:</i>"
 )
 
-TEXT_CHECK_MENU = (
-    "🧪 <b>Проверка ключей</b>\n\n"
-    "Бот прогонит все актуальные ключи через sing-box, проверит доступность и разложит рабочие по категориям:\n\n"
-    "🏳️ <b>Белый SNI</b> — маскировка под доверенные/незаблокированные домены\n"
-    "🏴 <b>Обычный SNI</b> — стандартный/иностранный SNI\n"
-    "🌍 <b>По странам</b> — фильтр по стране среди рабочих ключей\n\n"
-    "📶 <b>Пинг</b> — только задержка отклика\n"
-    "🚀 <b>Скорость</b> — только замер скорости\n"
-    "🧪 <b>Всё вместе</b> — пинг + скорость + страна\n\n"
-    "⚠️ Нерабочие ключи не сохраняются.\n"
-    "⏱ Проверка может занять несколько минут."
-)
-
 TEXT_HELP = (
     "📜 <b>Справка</b>\n\n"
     "/sub — получить подписку\n"
     "/keys — получить ключи\n"
-    "/check — проверка ключей (пинг/скорость, белые/черные)\n"
     "/support — поддержка\n"
     "/status — статус подписки\n"
     "/help — эта справка\n\n"
@@ -460,374 +404,11 @@ def get_random_keys(keys_list, count):
         return []
     return random.sample(keys_list, min(count, len(keys_list)))
 
-# ============================================================
-# ===== ПРОВЕРКА КЛЮЧЕЙ ЧЕРЕЗ SING-BOX =====
-# ============================================================
-
-def _split_remark(link):
-    if '#' in link:
-        base, frag = link.split('#', 1)
-        return base, urlparse.unquote(frag)
-    return link, ""
-
-def _parse_vless(link):
-    base, remark = _split_remark(link)
-    u = urlparse.urlparse(base)
-    qs = dict(urlparse.parse_qsl(u.query))
-    host, port = u.hostname, u.port
-    outbound = {
-        "type": "vless",
-        "tag": "proxy",
-        "server": host,
-        "server_port": port,
-        "uuid": u.username,
-        "flow": qs.get("flow", ""),
-    }
-    security = qs.get("security", "")
-    if security in ("tls", "reality"):
-        tls = {
-            "enabled": True,
-            "server_name": qs.get("sni") or qs.get("host") or host,
-            "insecure": qs.get("allowInsecure") == "1",
-        }
-        if security == "reality":
-            tls["reality"] = {"enabled": True, "public_key": qs.get("pbk", ""), "short_id": qs.get("sid", "")}
-        if qs.get("fp"):
-            tls["utls"] = {"enabled": True, "fingerprint": qs.get("fp")}
-        outbound["tls"] = tls
-    net = qs.get("type", "tcp")
-    if net == "ws":
-        outbound["transport"] = {"type": "ws", "path": qs.get("path", "/"), "headers": {"Host": qs.get("host", host)}}
-    elif net == "grpc":
-        outbound["transport"] = {"type": "grpc", "service_name": qs.get("serviceName", "")}
-    return host, port, remark, outbound
-
-def _parse_vmess(link):
-    b64 = link[len("vmess://"):].split('#')[0]
-    padded = b64 + '=' * (-len(b64) % 4)
-    data = json.loads(base64.b64decode(padded).decode('utf-8', errors='ignore'))
-    host = data.get("add")
-    port = int(data.get("port", 443))
-    remark = data.get("ps", "")
-    outbound = {
-        "type": "vmess",
-        "tag": "proxy",
-        "server": host,
-        "server_port": port,
-        "uuid": data.get("id"),
-        "security": data.get("scy", "auto"),
-        "alter_id": int(data.get("aid", 0) or 0),
-    }
-    if str(data.get("tls", "")).lower() == "tls":
-        outbound["tls"] = {"enabled": True, "server_name": data.get("sni") or data.get("host") or host, "insecure": False}
-    net = data.get("net", "tcp")
-    if net == "ws":
-        outbound["transport"] = {"type": "ws", "path": data.get("path", "/"), "headers": {"Host": data.get("host", host)}}
-    elif net == "grpc":
-        outbound["transport"] = {"type": "grpc", "service_name": data.get("path", "")}
-    return host, port, remark, outbound
-
-def _parse_trojan(link):
-    base, remark = _split_remark(link)
-    u = urlparse.urlparse(base)
-    qs = dict(urlparse.parse_qsl(u.query))
-    host, port = u.hostname, u.port
-    outbound = {
-        "type": "trojan",
-        "tag": "proxy",
-        "server": host,
-        "server_port": port,
-        "password": u.username,
-        "tls": {"enabled": True, "server_name": qs.get("sni") or host, "insecure": qs.get("allowInsecure") == "1"},
-    }
-    net = qs.get("type", "tcp")
-    if net == "ws":
-        outbound["transport"] = {"type": "ws", "path": qs.get("path", "/"), "headers": {"Host": qs.get("host", host)}}
-    elif net == "grpc":
-        outbound["transport"] = {"type": "grpc", "service_name": qs.get("serviceName", "")}
-    return host, port, remark, outbound
-
-def _parse_ss(link):
-    base, remark = _split_remark(link)
-    rest = base[len("ss://"):]
-    if '@' in rest:
-        userinfo, hostport = rest.rsplit('@', 1)
-        try:
-            padded = userinfo + '=' * (-len(userinfo) % 4)
-            decoded = base64.urlsafe_b64decode(padded).decode('utf-8')
-            method, password = decoded.split(':', 1)
-        except Exception:
-            method, password = userinfo.split(':', 1)
-        host_part = hostport.split('?')[0]
-        host, port = (host_part.rsplit(':', 1) if ':' in host_part else (host_part, "8388"))
-    else:
-        padded = rest + '=' * (-len(rest) % 4)
-        decoded = base64.urlsafe_b64decode(padded).decode('utf-8')
-        creds, hostport = decoded.rsplit('@', 1)
-        method, password = creds.split(':', 1)
-        host, port = hostport.rsplit(':', 1)
-    outbound = {
-        "type": "shadowsocks",
-        "tag": "proxy",
-        "server": host,
-        "server_port": int(port),
-        "method": method,
-        "password": password,
-    }
-    return host, int(port), remark, outbound
-
-def _parse_tuic(link):
-    base, remark = _split_remark(link)
-    u = urlparse.urlparse(base)
-    qs = dict(urlparse.parse_qsl(u.query))
-    host, port = u.hostname, u.port
-    outbound = {
-        "type": "tuic",
-        "tag": "proxy",
-        "server": host,
-        "server_port": port,
-        "uuid": u.username or "",
-        "password": u.password or "",
-        "congestion_control": qs.get("congestion_control", "bbr"),
-        "tls": {
-            "enabled": True,
-            "server_name": qs.get("sni") or host,
-            "insecure": qs.get("allow_insecure") == "1",
-            "alpn": [qs.get("alpn", "h3")],
-        },
-    }
-    return host, port, remark, outbound
-
-def _parse_hysteria2(link):
-    base, remark = _split_remark(link)
-    u = urlparse.urlparse(base)
-    qs = dict(urlparse.parse_qsl(u.query))
-    host, port = u.hostname, u.port
-    outbound = {
-        "type": "hysteria2",
-        "tag": "proxy",
-        "server": host,
-        "server_port": port,
-        "password": u.username or "",
-        "tls": {"enabled": True, "server_name": qs.get("sni") or host, "insecure": qs.get("insecure") == "1"},
-    }
-    return host, port, remark, outbound
-
-def parse_key_link(link):
-    try:
-        proto = link.split("://")[0].lower()
-        if proto == "vless":
-            res = _parse_vless(link)
-        elif proto == "vmess":
-            res = _parse_vmess(link)
-        elif proto == "trojan":
-            res = _parse_trojan(link)
-        elif proto == "ss":
-            res = _parse_ss(link)
-        elif proto == "tuic":
-            res = _parse_tuic(link)
-        elif proto in ("hysteria2", "hy2"):
-            res = _parse_hysteria2(link)
-        else:
-            return None
-        host, port, remark, outbound = res
-        if not host or not port:
-            return None
-        sni = (outbound.get("tls") or {}).get("server_name")
-        return {"protocol": proto, "host": host, "port": port, "remark": remark, "outbound": outbound, "sni": sni}
-    except Exception:
-        return None
-
-def _get_free_port():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-def _country_flag(code):
-    if not code or len(code) != 2:
-        return ""
-    code = code.upper()
-    return chr(0x1F1E6 + ord(code[0]) - ord('A')) + chr(0x1F1E6 + ord(code[1]) - ord('A'))
-
-def _get_country_code(host):
-    try:
-        ip = socket.gethostbyname(host)
-        r = requests.get(f"http://ip-api.com/json/{ip}?fields=countryCode", timeout=5)
-        return r.json().get("countryCode", "")
-    except Exception:
-        return ""
-
-def _build_singbox_config(outbound, local_port):
-    return {
-        "log": {"level": "error"},
-        "inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": local_port}],
-        "outbounds": [outbound, {"type": "direct", "tag": "direct"}],
-        "route": {"final": "proxy"},
-    }
-
-def test_key(link, mode="all"):
-    """mode: ping | speed | all. Возвращает dict с результатом теста одного ключа."""
-    parsed = parse_key_link(link)
-    result = {"ok": False, "ping_ms": None, "speed_mbps": None, "country": "", "remark": "", "sni": None}
-    if not parsed:
-        result["error"] = "unsupported_protocol"
-        return result
-    result["remark"] = parsed["remark"]
-    result["sni"] = parsed.get("sni")
-
-    local_port = _get_free_port()
-    config_path = os.path.join("/tmp", f"sb_{local_port}.json")
-    config = _build_singbox_config(parsed["outbound"], local_port)
-    proc = None
-    try:
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f)
-
-        proc = subprocess.Popen(
-            [SING_BOX_BIN, "run", "-c", config_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        time.sleep(SINGBOX_STARTUP_DELAY)
-
-        proxies = {
-            "http": f"socks5h://127.0.0.1:{local_port}",
-            "https": f"socks5h://127.0.0.1:{local_port}",
-        }
-
-        if mode in ("ping", "all"):
-            t0 = time.time()
-            r = requests.get(PING_TEST_URL, proxies=proxies, timeout=CHECK_TIMEOUT)
-            if r.status_code in (200, 204):
-                result["ping_ms"] = round((time.time() - t0) * 1000)
-                result["ok"] = True
-
-        if mode in ("speed", "all"):
-            t0 = time.time()
-            total = 0
-            r = requests.get(SPEEDTEST_URL, proxies=proxies, timeout=CHECK_TIMEOUT, stream=True)
-            for chunk in r.iter_content(chunk_size=65536):
-                total += len(chunk)
-                if time.time() - t0 > CHECK_TIMEOUT:
-                    break
-            elapsed = time.time() - t0
-            if total > 0 and elapsed > 0:
-                result["speed_mbps"] = round((total * 8 / elapsed) / 1_000_000, 1)
-                result["ok"] = True
-
-        if result["ok"]:
-            result["country"] = _get_country_code(parsed["host"])
-
-    except Exception as e:
-        result["error"] = str(e)
-        result["ok"] = False
-    finally:
-        if proc:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except Exception:
-                proc.kill()
-        try:
-            os.remove(config_path)
-        except Exception:
-            pass
-    return result
-
-def build_tested_link(original_link, result):
-    base = original_link.split('#')[0]
-    parts = []
-    if result.get("ping_ms") is not None:
-        parts.append(f"⚡{result['ping_ms']}ms")
-    if result.get("speed_mbps") is not None:
-        parts.append(f"🚀{result['speed_mbps']}Mbps")
-    flag = _country_flag(result.get("country", ""))
-    if flag:
-        parts.append(flag)
-    orig = result.get("remark") or ""
-    new_remark = " ".join(parts) + (f" {orig}" if orig else "")
-    if not new_remark.strip():
-        return original_link
-    return f"{base}#{urlparse.quote(new_remark.strip())}"
-
-def save_checked_keys(white, black, countries, mode, dead_count):
-    data = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "mode": mode,
-        "white": white,
-        "black": black,
-        "countries": countries,
-        "dead_count": dead_count,
-    }
-    try:
-        with open(CHECKED_KEYS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-def load_checked_keys():
-    try:
-        with open(CHECKED_KEYS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-def run_key_check(chat_id, message_id, mode):
-    keys_data, error = fetch_and_parse_keys()
-    if error:
-        edit_message(chat_id, message_id, f"❌ {error}", reply_markup=kb_back())
-        return
-    all_keys = list(dict.fromkeys(keys_data.get("lite", []) + keys_data.get("full", [])))
-    total = len(all_keys)
-    if total == 0:
-        edit_message(chat_id, message_id, "😔 Ключи не найдены", reply_markup=kb_back())
-        return
-
-    edit_message(chat_id, message_id, f"⏳ Проверяю {total} ключей...\n🔧 Режим: {mode}\nЭто может занять пару минут.")
-
-    white, black = [], []
-    countries = {}
-    dead_count = 0
-
-    def worker(link):
-        return link, test_key(link, mode=mode)
-
-    with ThreadPoolExecutor(max_workers=CHECK_CONCURRENCY) as ex:
-        futures = [ex.submit(worker, k) for k in all_keys]
-        for fut in as_completed(futures):
-            link, res = fut.result()
-            if not res.get("ok"):
-                # нерабочие ключи не сохраняем
-                dead_count += 1
-                continue
-            tested_link = build_tested_link(link, res)
-            if is_white_sni(res.get("sni")):
-                white.append(tested_link)
-            else:
-                black.append(tested_link)
-            code = (res.get("country") or "").upper() or "??"
-            countries.setdefault(code, []).append(tested_link)
-
-    increment_stat("checks_run")
-    save_checked_keys(white, black, countries, mode, dead_count)
-
-    text = (
-        f"✅ <b>Проверка завершена</b>\n\n"
-        f"🔧 Режим: {mode}\n"
-        f"🏳️ Белый SNI: {len(white)}\n"
-        f"🏴 Обычный SNI: {len(black)}\n"
-        f"❌ Не рабочих (не сохранены): {dead_count}\n\n"
-        f"🌍 Стран найдено: {len(countries)}"
-    )
-    edit_message(chat_id, message_id, text, reply_markup=kb_check_result(len(white), len(black)))
-
 # ===== КЛАВИАТУРЫ =====
 def kb_main(user_id=None):
     rows = [
         [{"text": "📁 Получить подписку", "callback_data": "menu_sub"}],
         [{"text": "🔑 Получить ключи", "callback_data": "menu_keys"}],
-        [{"text": "🧪 Проверка ключей", "callback_data": "menu_check"}],
         [{"text": "🎁 Поделиться ключом", "callback_data": "share_key"}],
         [{"text": "⭐ Оценить проект", "callback_data": "rate_project"}],
         [{"text": "💳 Поддержать канал", "url": SUPPORT_URL}],
@@ -864,38 +445,6 @@ def kb_keys():
             [{"text": "◀️ Назад", "callback_data": "back_main"}],
         ]
     }
-
-def kb_check_menu():
-    return {
-        "inline_keyboard": [
-            [{"text": "📶 Проверить пинг", "callback_data": "check_ping"}],
-            [{"text": "🚀 Проверить скорость", "callback_data": "check_speed"}],
-            [{"text": "🧪 Проверить всё", "callback_data": "check_all"}],
-            [{"text": "◀️ Назад", "callback_data": "back_main"}],
-        ]
-    }
-
-def kb_check_result(white_count, black_count):
-    return {
-        "inline_keyboard": [
-            [
-                {"text": f"🏳️ Белый SNI ({white_count})", "callback_data": "show_white"},
-                {"text": f"🏴 Обычный SNI ({black_count})", "callback_data": "show_black"},
-            ],
-            [{"text": "🌍 По странам", "callback_data": "show_countries"}],
-            [{"text": "🔁 Проверить снова", "callback_data": "menu_check"}],
-            [{"text": "◀️ Назад", "callback_data": "back_main"}],
-        ]
-    }
-
-def kb_countries(countries):
-    rows = []
-    ordered = sorted(countries.items(), key=lambda x: -len(x[1]))[:MAX_COUNTRY_BUTTONS]
-    for code, keys in ordered:
-        flag = _country_flag(code) or "🌐"
-        rows.append([{"text": f"{flag} {code} ({len(keys)})", "callback_data": f"country_{code}"}])
-    rows.append([{"text": "◀️ Назад", "callback_data": "menu_check"}])
-    return {"inline_keyboard": rows}
 
 def kb_back():
     return {"inline_keyboard": [[{"text": "🏠 В главное меню", "callback_data": "back_main"}]]}
@@ -965,7 +514,7 @@ def handle_message(msg):
         return
 
     # ===== ПРОВЕРКА ПОДПИСКИ =====
-    if user_id != ADMIN_ID and text in ("/start", "/sub", "/keys", "/check", "/support", "/status", "/help"):
+    if user_id != ADMIN_ID and text in ("/start", "/sub", "/keys", "/support", "/status", "/help"):
         if not is_subscribed(user_id):
             send_message(chat_id, TEXT_NEED_SUBSCRIPTION, reply_markup=kb_subscribe_required())
             return
@@ -979,9 +528,6 @@ def handle_message(msg):
     elif text == "/keys":
         log_action(user, "🔑 ОТКРЫЛ МЕНЮ КЛЮЧЕЙ")
         send_message(chat_id, TEXT_KEYS_MENU, reply_markup=kb_keys())
-    elif text == "/check":
-        log_action(user, "🧪 ОТКРЫЛ ПРОВЕРКУ КЛЮЧЕЙ")
-        send_message(chat_id, TEXT_CHECK_MENU, reply_markup=kb_check_menu())
     elif text == "/support":
         log_action(user, "🆘 ОТКРЫЛ ПОДДЕРЖКУ")
         send_message(chat_id, TEXT_SUPPORT, reply_markup=kb_back())
@@ -1074,51 +620,6 @@ def handle_callback(cb):
         selected = get_random_keys(keys, count)
         keys_block = "\n\n".join(f"<code>{k}</code>" for k in selected)
         edit_message(chat_id, message_id, f"🔑 <b>{label} — {len(selected)} шт.</b>\n\n{desc}\n\n{keys_block}\n\n📢 {CHANNEL_URL}", reply_markup=kb_back())
-
-    elif data == "menu_check":
-        log_action(user, "🧪 ОТКРЫЛ ПРОВЕРКУ КЛЮЧЕЙ")
-        edit_message(chat_id, message_id, TEXT_CHECK_MENU, reply_markup=kb_check_menu())
-    elif data in ("check_ping", "check_speed", "check_all"):
-        mode = {"check_ping": "ping", "check_speed": "speed", "check_all": "all"}[data]
-        log_action(user, f"🧪 ЗАПУСТИЛ ПРОВЕРКУ КЛЮЧЕЙ: {mode}")
-        threading.Thread(target=run_key_check, args=(chat_id, message_id, mode), daemon=True).start()
-    elif data in ("show_white", "show_black"):
-        checked = load_checked_keys()
-        if not checked:
-            edit_message(chat_id, message_id, "😔 Нет данных проверки. Сначала запусти проверку ключей.", reply_markup=kb_back())
-            return
-        keys_list = checked["white"] if data == "show_white" else checked["black"]
-        label = "🏳️ Ключи с белым SNI" if data == "show_white" else "🏴 Ключи с обычным SNI"
-        if not keys_list:
-            edit_message(chat_id, message_id, f"{label}\n\nСписок пуст.", reply_markup=kb_back())
-            return
-        shown = keys_list[:SHOW_KEYS_LIMIT]
-        block = "\n\n".join(f"<code>{k}</code>" for k in shown)
-        more = f"\n\n…и ещё {len(keys_list) - SHOW_KEYS_LIMIT}" if len(keys_list) > SHOW_KEYS_LIMIT else ""
-        edit_message(chat_id, message_id, f"{label} ({len(keys_list)} шт.)\n\n{block}{more}", reply_markup=kb_back())
-
-    elif data == "show_countries":
-        checked = load_checked_keys()
-        countries = (checked or {}).get("countries") or {}
-        if not countries:
-            edit_message(chat_id, message_id, "😔 Нет данных проверки. Сначала запусти проверку ключей.", reply_markup=kb_back())
-            return
-        edit_message(chat_id, message_id, "🌍 <b>Выбери страну</b>\n\nПоказаны только страны рабочих ключей:", reply_markup=kb_countries(countries))
-
-    elif data.startswith("country_"):
-        code = data[len("country_"):]
-        checked = load_checked_keys()
-        countries = (checked or {}).get("countries") or {}
-        keys_list = countries.get(code, [])
-        flag = _country_flag(code) or "🌐"
-        label = f"{flag} Ключи — {code}"
-        if not keys_list:
-            edit_message(chat_id, message_id, f"{label}\n\nСписок пуст.", reply_markup=kb_back())
-            return
-        shown = keys_list[:SHOW_KEYS_LIMIT]
-        block = "\n\n".join(f"<code>{k}</code>" for k in shown)
-        more = f"\n\n…и ещё {len(keys_list) - SHOW_KEYS_LIMIT}" if len(keys_list) > SHOW_KEYS_LIMIT else ""
-        edit_message(chat_id, message_id, f"{label} ({len(keys_list)} шт.)\n\n{block}{more}", reply_markup=kb_back())
 
     elif data == "share_key":
         log_action(user, "🎁 ОТКРЫЛ ФОРМУ ОТПРАВКИ КЛЮЧА")
